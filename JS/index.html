@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ExeWatch JS Browser Sample</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f5f5f5;
+      color: #333;
+      padding: 32px;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      font-size: 24px;
+      margin-bottom: 4px;
+    }
+
+    .subtitle {
+      color: #888;
+      font-size: 14px;
+      margin-bottom: 32px;
+    }
+
+    .subtitle a { color: #2563eb; text-decoration: none; }
+    .subtitle a:hover { text-decoration: underline; }
+
+    .section {
+      background: #fff;
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+
+    .section h2 {
+      font-size: 16px;
+      margin-bottom: 4px;
+    }
+
+    .section p {
+      font-size: 13px;
+      color: #666;
+      margin-bottom: 12px;
+    }
+
+    .btn-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    button {
+      padding: 8px 16px;
+      border: 1px solid #d0d0d0;
+      border-radius: 6px;
+      background: #fff;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    button:hover { background: #f0f0f0; }
+    button:active { background: #e0e0e0; }
+
+    .btn-debug { border-color: #94a3b8; color: #475569; }
+    .btn-info { border-color: #60a5fa; color: #2563eb; }
+    .btn-warning { border-color: #fbbf24; color: #b45309; }
+    .btn-error { border-color: #f87171; color: #dc2626; }
+    .btn-fatal { border-color: #c084fc; color: #7c3aed; }
+    .btn-action { border-color: #34d399; color: #059669; }
+
+    #log {
+      background: #1e1e1e;
+      color: #d4d4d4;
+      font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      padding: 16px;
+      border-radius: 8px;
+      height: 260px;
+      overflow-y: auto;
+      margin-top: 16px;
+      border: 1px solid #333;
+    }
+
+    #log .ts { color: #666; }
+    #log .debug { color: #94a3b8; }
+    #log .info { color: #60a5fa; }
+    #log .warning { color: #fbbf24; }
+    #log .error { color: #f87171; }
+    #log .fatal { color: #c084fc; }
+    #log .action { color: #34d399; }
+
+    .log-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 24px;
+      margin-bottom: 0;
+    }
+
+    .log-header h2 { font-size: 16px; }
+
+    .clear-btn {
+      font-size: 12px;
+      padding: 4px 10px;
+      border: 1px solid #d0d0d0;
+      border-radius: 4px;
+      background: #fff;
+      cursor: pointer;
+      color: #888;
+    }
+
+    .clear-btn:hover { background: #f0f0f0; }
+
+    /* ── API key missing banner ── */
+    #api-key-banner {
+      display: none;
+      background: #fef2f2;
+      border: 1px solid #fca5a5;
+      border-radius: 8px;
+      padding: 24px;
+      margin-bottom: 24px;
+      text-align: center;
+    }
+
+    #api-key-banner h2 {
+      color: #dc2626;
+      font-size: 18px;
+      margin-bottom: 8px;
+    }
+
+    #api-key-banner p {
+      color: #555;
+      font-size: 14px;
+      line-height: 1.6;
+      margin: 0;
+    }
+
+    #api-key-banner a {
+      color: #2563eb;
+      text-decoration: none;
+      font-weight: 600;
+    }
+
+    #api-key-banner a:hover { text-decoration: underline; }
+
+    #api-key-banner code {
+      background: #fee2e2;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 13px;
+    }
+
+    body.not-configured .section { opacity: 0.4; pointer-events: none; }
+    body.not-configured .log-header { opacity: 0.4; pointer-events: none; }
+    body.not-configured #log { opacity: 0.4; }
+  </style>
+</head>
+<body>
+
+  <h1>ExeWatch JS Browser Sample</h1>
+  <p class="subtitle">
+    Interactive demo &mdash; open the
+    <a href="https://exewatch.com" target="_blank">ExeWatch dashboard</a>
+    to see events arrive in real time.
+  </p>
+
+  <!-- API key missing banner (shown by JS when key is not configured) -->
+  <div id="api-key-banner">
+    <h2>API Key Not Configured</h2>
+    <p>
+      To run this demo you need a free ExeWatch account.<br>
+      Sign up at <a href="https://exewatch.com" target="_blank">exewatch.com</a>,
+      create a <strong>Browser</strong> application, and copy your API key.<br><br>
+      Then open this file in a text editor, find <code>YOUR_API_KEY_HERE</code> and replace it with your key.<br>
+      Browser API keys start with <code>ew_web_</code>.
+    </p>
+  </div>
+
+  <!-- Logging -->
+  <div class="section">
+    <h2>Logging</h2>
+    <p>Send log messages at each severity level.</p>
+    <div class="btn-row">
+      <button class="btn-debug" onclick="sendDebug()">Debug</button>
+      <button class="btn-info" onclick="sendInfo()">Info</button>
+      <button class="btn-warning" onclick="sendWarning()">Warning</button>
+      <button class="btn-error" onclick="sendError()">Error</button>
+      <button class="btn-fatal" onclick="sendFatal()">Fatal</button>
+    </div>
+  </div>
+
+  <!-- Timing -->
+  <div class="section">
+    <h2>Timing</h2>
+    <p>Measure a simulated async operation (300 &ndash; 1500 ms).</p>
+    <div class="btn-row">
+      <button class="btn-action" onclick="testTiming()">Start Timing Test</button>
+    </div>
+  </div>
+
+  <!-- Breadcrumbs + Error -->
+  <div class="section">
+    <h2>Breadcrumbs + Error</h2>
+    <p>Add breadcrumbs then trigger an error &mdash; the trail shows what happened before the crash.</p>
+    <div class="btn-row">
+      <button class="btn-action" onclick="testBreadcrumbsAndError()">Trigger Error with Breadcrumbs</button>
+    </div>
+  </div>
+
+  <!-- User Identity -->
+  <div class="section">
+    <h2>User Identity</h2>
+    <p>Associate logs with a user so you can filter by user in the dashboard.</p>
+    <div class="btn-row">
+      <button class="btn-action" onclick="setDemoUser()">Set User</button>
+      <button onclick="clearDemoUser()">Clear User</button>
+    </div>
+  </div>
+
+  <!-- Tags -->
+  <div class="section">
+    <h2>Tags</h2>
+    <p>Attach key-value metadata to all subsequent events.</p>
+    <div class="btn-row">
+      <button class="btn-action" onclick="setDemoTags()">Set Tags</button>
+      <button onclick="clearDemoTags()">Clear Tags</button>
+    </div>
+  </div>
+
+  <!-- Metrics -->
+  <div class="section">
+    <h2>Metrics</h2>
+    <p>Track counters (cumulative totals) and gauges (point-in-time values).</p>
+    <div class="btn-row">
+      <button class="btn-action" onclick="incrementPageViews()">Increment Counter</button>
+      <button class="btn-action" onclick="recordCartItems()">Record Gauge</button>
+      <button onclick="flushDemoMetrics()">Flush Metrics</button>
+    </div>
+  </div>
+
+  <!-- Log output -->
+  <div class="log-header">
+    <h2>Local Log</h2>
+    <button class="clear-btn" onclick="clearLog()">Clear</button>
+  </div>
+  <div id="log"></div>
+
+  <!--
+    =====================================================================
+    INITIALIZATION — REQUIRED
+
+    Set window.ewConfig BEFORE loading the SDK script. The SDK reads
+    this object on load and auto-initializes — no explicit init() call needed.
+
+    Configuration options:
+      apiKey      (REQUIRED) Your browser API key (starts with "ew_web_").
+                             Get it from https://exewatch.com after creating
+                             a Browser application in the dashboard.
+      customerId  (REQUIRED) Identifies the customer/tenant using your app.
+      appVersion  (optional) Version string shown in the dashboard.
+      debug       (optional) Set to true to log SDK internals to the console.
+      autoCapture (optional) Auto-capture unhandled errors and console.error
+                             (default: true).
+      sampleRate  (optional) 0.0–1.0 fraction of events to send
+                             (default: 1.0 = 100%). Errors/fatal always sent.
+      batchSize   (optional) Events per batch (default: 10).
+      flushInterval (optional) Auto-flush interval in ms (default: 5000).
+
+    After the SDK loads, the global "ew" object is available for all calls.
+    Full docs: https://exewatch.com/ui/docs
+    =====================================================================
+  -->
+  <script>
+    window.ewConfig = {
+      apiKey: 'YOUR_API_KEY_HERE',   // REQUIRED — replace with your key
+      customerId: 'SampleCustomer',  // REQUIRED — your customer/tenant id
+      appVersion: '1.0.0',           // OPTIONAL — shown in the dashboard
+      debug: true                    // OPTIONAL — logs SDK internals to console
+    };
+  </script>
+  <script src="https://exewatch.com/static/js/exewatch.v1.min.js"></script>
+
+  <script>
+    // ── Local log helper (for this demo only, not part of the SDK) ────
+    var logEl = document.getElementById('log');
+
+    function log(level, msg) {
+      var now = new Date().toLocaleTimeString();
+      var line = document.createElement('div');
+      line.innerHTML =
+        '<span class="ts">' + now + '</span> ' +
+        '<span class="' + level + '">[' + level.toUpperCase() + ']</span> ' +
+        msg;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function clearLog() {
+      logEl.innerHTML = '';
+    }
+
+    // ── LOGGING ───────────────────────────────────────────────────────
+    // Five severity levels, from least to most critical.
+    // All methods: ew.<level>(message, category)
+    //   - message  : the log text
+    //   - category : OPTIONAL grouping label (e.g. 'auth', 'api', 'db').
+    //                Use categories to filter logs in the dashboard.
+    // Logs are batched and sent automatically every flushInterval ms.
+    // Unhandled errors and console.error are captured automatically
+    // (unless autoCapture is set to false in ewConfig).
+
+    function sendDebug() {
+      ew.debug('This is a DEBUG message', 'sample');
+      log('debug', 'Sent debug log');
+    }
+
+    function sendInfo() {
+      ew.info('This is an INFO message', 'sample');
+      log('info', 'Sent info log');
+    }
+
+    function sendWarning() {
+      ew.warning('This is a WARNING message', 'sample');
+      log('warning', 'Sent warning log');
+    }
+
+    function sendError() {
+      ew.error('This is an ERROR message', 'sample');
+      log('error', 'Sent error log');
+    }
+
+    function sendFatal() {
+      ew.fatal('This is a FATAL message', 'sample');
+      log('fatal', 'Sent fatal log');
+    }
+
+    // ── TIMING ────────────────────────────────────────────────────────
+    // Measure how long operations take.
+    //   ew.startTiming(operationName, category)  — begin measurement
+    //   ew.endTiming(operationName)              — end and report
+    // The operationName links the start/end pair. Use descriptive names
+    // like 'api_call', 'render_dashboard', 'load_data'.
+    // ExeWatch calculates Avg/Min/Max/P95 stats in the dashboard.
+
+    function testTiming() {
+      var duration = 300 + Math.floor(Math.random() * 1200);
+      ew.startTiming('simulated_operation', 'sample');
+      log('action', 'Timing started &mdash; simulating ' + duration + ' ms operation...');
+
+      setTimeout(function () {
+        ew.endTiming('simulated_operation');
+        log('action', 'Timing ended &mdash; ' + duration + ' ms reported to ExeWatch');
+      }, duration);
+    }
+
+    // ── BREADCRUMBS + ERROR ───────────────────────────────────────────
+    // Breadcrumbs record what happened before an error, giving you context
+    // to understand failures without reproducing them.
+    //   ew.addBreadcrumb(message, category)
+    // The SDK keeps the last 20 breadcrumbs. They are automatically
+    // attached to the next error/fatal event.
+    // Categories are free-form: 'navigation', 'ui', 'user', 'http', etc.
+
+    function testBreadcrumbsAndError() {
+      ew.addBreadcrumb('User opened settings page', 'navigation');
+      log('action', 'Breadcrumb: User opened settings page');
+
+      ew.addBreadcrumb('Changed language to Italian', 'user');
+      log('action', 'Breadcrumb: Changed language to Italian');
+
+      ew.addBreadcrumb('Clicked Save', 'ui');
+      log('action', 'Breadcrumb: Clicked Save');
+
+      // Log the error — the breadcrumb trail is automatically included
+      log('error', 'Throwing error &mdash; check the ExeWatch dashboard for breadcrumb trail');
+      try {
+        throw new Error('Save failed: invalid configuration');
+      } catch (e) {
+        ew.error('Caught exception: ' + e.message, 'sample');
+      }
+    }
+
+    // ── USER IDENTITY — OPTIONAL ──────────────────────────────────────
+    // Track which user triggered events. Call once after login.
+    //   ew.setUser({ id, email, name })
+    //   - Only id is required; email and name are optional.
+    // All subsequent logs, errors, and timings will include this user's
+    // info, so you can search by user in the dashboard.
+    // Call ew.clearUser() on logout.
+
+    function setDemoUser() {
+      ew.setUser({ id: 'user-42', email: 'jane@example.com', name: 'Jane Doe' });
+      // Send a log so you can immediately verify in the dashboard that
+      // this event carries the user identity we just set.
+      ew.info('User identity configured', 'sample');
+      log('info', 'User set &mdash; id: user-42, email: jane@example.com');
+      log('info', 'Sent a log &mdash; open the dashboard and check that this event includes the user');
+    }
+
+    function clearDemoUser() {
+      ew.clearUser();
+      ew.info('User identity cleared', 'sample');
+      log('info', 'User cleared');
+      log('info', 'Sent a log &mdash; open the dashboard and verify this event has no user');
+    }
+
+    // ── TAGS — OPTIONAL ───────────────────────────────────────────────
+    // Attach key-value metadata to ALL subsequent events. Tags are global —
+    // once set, they are included in every log, error, timing, and metric
+    // until removed. Use them for environment, feature flags, A/B groups, etc.
+    //   ew.setTag(key, value)   — set one tag
+    //   ew.removeTag(key)       — remove one tag
+    //   ew.clearTags()          — remove all tags
+
+    function setDemoTags() {
+      ew.setTag('environment', 'staging');
+      ew.setTag('feature_flag', 'new_checkout');
+      // Send a log so you can immediately verify in the dashboard that
+      // this event carries the tags we just set.
+      ew.info('Tags configured — this event carries the tags', 'sample');
+      log('info', 'Tags set &mdash; environment=staging, feature_flag=new_checkout');
+      log('info', 'Sent a log &mdash; open the dashboard and check that this event includes the tags');
+    }
+
+    function clearDemoTags() {
+      ew.clearTags();
+      ew.info('Tags cleared — this event has no tags', 'sample');
+      log('info', 'Tags cleared');
+      log('info', 'Sent a log &mdash; open the dashboard and verify this event has no tags');
+    }
+
+    // ── METRICS — OPTIONAL ────────────────────────────────────────────
+    // Track counters and gauges.
+    //
+    // Counters are cumulative values that only go up:
+    //   ew.incrementCounter(name, value, tag)
+    //   Examples: page_views, api_calls, cache_hits.
+    //   value (default 1) is the amount to add.
+    //
+    // Gauges are point-in-time values that go up and down:
+    //   ew.recordGauge(name, value, tag)
+    //   Examples: cart_items, active_users, memory_usage.
+    //
+    // You can also register periodic gauges that auto-sample on a timer:
+    //   ew.registerPeriodicGauge(name, callback, tag)
+    //   ew.unregisterPeriodicGauge(name)
+    //
+    // Metrics are pre-aggregated in memory and flushed automatically.
+    // Use ew.flushMetrics() to force an immediate flush.
+
+    var pageViewCount = 0;
+
+    function incrementPageViews() {
+      pageViewCount++;
+      ew.incrementCounter('page_views', 1, 'sample');
+      log('action', 'Counter incremented &mdash; page_views = ' + pageViewCount);
+    }
+
+    function recordCartItems() {
+      var items = Math.floor(Math.random() * 10) + 1;
+      ew.recordGauge('cart_items', items, 'sample');
+      log('action', 'Gauge recorded &mdash; cart_items = ' + items);
+    }
+
+    function flushDemoMetrics() {
+      ew.flushMetrics();
+      log('info', 'Metrics flushed to ExeWatch');
+    }
+
+    // ── API key check ─────────────────────────────────────────────────
+    if (!window.ewConfig || !window.ewConfig.apiKey || window.ewConfig.apiKey === 'YOUR_API_KEY_HERE') {
+      document.body.classList.add('not-configured');
+      document.getElementById('api-key-banner').style.display = 'block';
+    } else {
+      log('info', 'ExeWatch JS sample loaded &mdash; click the buttons above to try each feature');
+    }
+  </script>
+
+</body>
+</html>
