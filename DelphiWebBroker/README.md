@@ -4,7 +4,7 @@ A REST API server built with Delphi WebBroker that demonstrates monitoring a web
 
 ## Requirements
 
-- Embarcadero Delphi 12.3+ (Community Edition works fine)
+- Embarcadero Delphi 12.3+
 
 ## Step-by-step
 

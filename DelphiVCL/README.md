@@ -4,7 +4,7 @@ A Windows desktop application that demonstrates logging, timing, and exception c
 
 ## Requirements
 
-- Embarcadero Delphi 12.3+ (Community Edition works fine)
+- Embarcadero Delphi 12.3+
 
 ## Step-by-step
 

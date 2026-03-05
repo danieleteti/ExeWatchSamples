@@ -40,7 +40,7 @@ This is enough for personal projects and small commercial applications. Sign up 
 | [Delphi VCL](DelphiVCL/) | Windows desktop app with buttons for every SDK feature: logging, timing, breadcrumbs, user identity, tags, metrics, and automatic VCL exception capture. | [README](DelphiVCL/README.md) |
 | [Delphi WebBroker](DelphiWebBroker/) | REST API server that wraps every HTTP request with ExeWatch timing, error tracking, and request counters. 6 demo endpoints included. | [README](DelphiWebBroker/README.md) |
 
-**Requirements:** Embarcadero Delphi 12.3+ (Community Edition works fine)
+**Requirements:** Embarcadero Delphi 12.3+
 
 ### .NET / C#
 
