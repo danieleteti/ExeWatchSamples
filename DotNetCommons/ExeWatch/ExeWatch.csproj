@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ExeWatch</RootNamespace>
+    <AssemblyName>ExeWatch</AssemblyName>
+    <Version>0.1.0</Version>
+    <Description>ExeWatch SDK for .NET - Application Performance Monitoring for desktop applications</Description>
+    <Authors>ExeWatch</Authors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ExeWatch.Tests" />
+  </ItemGroup>
+
+</Project>

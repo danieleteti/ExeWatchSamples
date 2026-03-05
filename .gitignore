@@ -83,3 +83,37 @@ modules/
 
 /CLAUDE.md
 *.res
+
+# ---> .NET / C#
+# Build output
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+
+# NuGet
+*.nupkg
+*.snupkg
+**/packages/*
+!**/packages/build/
+
+# Rider
+.idea/
+*.sln.iml
+
+# dotCover
+*.dotCover
+
+# Publish output
+publish/

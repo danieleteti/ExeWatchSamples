@@ -1269,13 +1269,13 @@ begin
   // Memory
   MemStatus.dwLength := SizeOf(MemStatus);
   GlobalMemoryStatusEx(MemStatus);
-  Result.TotalPhysicalMemory := MemStatus.ullTotalPhys;
-  Result.AvailablePhysicalMemory := MemStatus.ullAvailPhys;
+  Result.TotalPhysicalMemory := Int64(MemStatus.ullTotalPhys);
+  Result.AvailablePhysicalMemory := Int64(MemStatus.ullAvailPhys);
 
   // CPU
   GetNativeSystemInfo(SysInfo);
   Result.CPUCores := 0; // Will be filled from registry
-  Result.CPULogicalProcessors := SysInfo.dwNumberOfProcessors;
+  Result.CPULogicalProcessors := Integer(SysInfo.dwNumberOfProcessors);
 
   case SysInfo.wProcessorArchitecture of
     PROCESSOR_ARCHITECTURE_AMD64: Result.CPUArchitecture := 'x64';
@@ -1391,7 +1391,7 @@ begin
     FillChar(DisplayDevice, SizeOf(DisplayDevice), 0);
     DisplayDevice.cb := SizeOf(DisplayDevice);
 
-    if not EnumDisplayDevices(nil, MonIdx, DisplayDevice, 0) then
+    if not EnumDisplayDevices(nil, Cardinal(MonIdx), DisplayDevice, 0) then
       Break;
 
     // Only include active monitors (attached to desktop)
@@ -1404,9 +1404,9 @@ begin
       begin
         MonInfo.Index := Length(Result.Monitors);
         MonInfo.Name := DisplayDevice.DeviceString;
-        MonInfo.Width := DevMode.dmPelsWidth;
-        MonInfo.Height := DevMode.dmPelsHeight;
-        MonInfo.BitsPerPixel := DevMode.dmBitsPerPel;
+        MonInfo.Width := Integer(DevMode.dmPelsWidth);
+        MonInfo.Height := Integer(DevMode.dmPelsHeight);
+        MonInfo.BitsPerPixel := Integer(DevMode.dmBitsPerPel);
         MonInfo.Primary := (DisplayDevice.StateFlags and DISPLAY_DEVICE_PRIMARY_DEVICE) <> 0;
 
         SetLength(Result.Monitors, Length(Result.Monitors) + 1);
@@ -1446,7 +1446,7 @@ begin
         begin
           SetLength(Result.LocalIPAddresses, Length(Result.LocalIPAddresses) + 1);
           Result.LocalIPAddresses[High(Result.LocalIPAddresses)] :=
-            string(inet_ntoa(AddrList^^));
+            string(AnsiString(inet_ntoa(AddrList^^)));
           Inc(AddrList);
         end;
       end;

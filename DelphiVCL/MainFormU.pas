@@ -77,6 +77,10 @@ uses
   Winapi.PsAPI,
   ExeWatchSDKv1;
 
+const
+  // Replace with your actual API key from the ExeWatch dashboard
+  EXEWATCH_API_KEY = 'ew_win_xxxxxx_USE_YOUR_OWN_KEY';
+
 {$R *.dfm}
 
 { Returns the current process working set (physical memory) in megabytes.
@@ -148,7 +152,19 @@ begin
   // ---------------------------------------------------------------
   // REQUIRED — Replace with your API key from https://exewatch.com
   // ---------------------------------------------------------------
-  InitializeExeWatch('ew_win_xxxxxx_USE_YOUR_OWN_KEY', 'SampleCustomer');
+  if EXEWATCH_API_KEY = 'ew_win_xxxxxx_USE_YOUR_OWN_KEY' then
+  begin
+    ShowMessage(
+      'API Key Not Configured' + sLineBreak + sLineBreak +
+      'You must set your API key before running this sample.' + sLineBreak +
+      'Open MainFormU.pas, find the EXEWATCH_API_KEY constant and replace' + sLineBreak +
+      '"ew_win_xxxxxx_USE_YOUR_OWN_KEY" with your actual API key.' + sLineBreak + sLineBreak +
+      'Get your API key from: https://exewatch.com');
+    Application.Terminate;
+    Exit;
+  end;
+
+  InitializeExeWatch(EXEWATCH_API_KEY, 'SampleCustomer');
 
   // OPTIONAL — Get notified when the SDK encounters an error (e.g. network failure).
   // Useful for debugging integration issues. You can safely omit this in production.
