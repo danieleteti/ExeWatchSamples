@@ -29,7 +29,7 @@ You need an ExeWatch account to run these samples. **The free Hobby plan require
 
 This is enough for personal projects and small commercial applications. Sign up at **https://exewatch.com**.
 
-Once registered, create an application in the ExeWatch dashboard and copy your **API Key** — you'll need it for the samples.
+**Important:** Once registered, create an application in the ExeWatch dashboard and copy your **API Key**. Every sample requires a valid API key to send data — without it, the app will show an error and exit.
 
 ## Samples
 
