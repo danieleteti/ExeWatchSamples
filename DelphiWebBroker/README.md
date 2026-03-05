@@ -1,18 +1,30 @@
-# ExeWatch WebBroker Sample
+# ExeWatch — Delphi WebBroker Sample
 
-A demonstration Delphi WebBroker application integrated with ExeWatch SDK for logging, metrics, and error tracking.
+A REST API server built with Delphi WebBroker that demonstrates monitoring a web service with ExeWatch.
 
-## What It Demonstrates
+## Requirements
 
-This sample application showcases how to integrate ExeWatch into a Delphi WebBroker server to monitor:
+- Embarcadero Delphi 12.3+ (Community Edition works fine)
 
-- **Request Logging**: Every HTTP request is logged with breadcrumbs
-- **Timing**: Each endpoint's response time is measured and recorded
-- **Error Tracking**: Exceptions are automatically captured and reported with full context
-- **Metrics**: Counters track total requests and errors
-- **Global Tags**: Context tags are added to all events
+## Step-by-step
 
-## Endpoints
+**Step 1** — Open `WebBrokerSample.dproj` in the Delphi IDE.
+
+**Step 2** — Open `WebBrokerSample.dpr` and replace the `EXEWATCH_API_KEY` constant with your own API key (from [exewatch.com](https://exewatch.com)).
+
+**Step 3** — Build and run. The server starts on port 8080 (use `-p 9000` for a different port).
+
+**Step 4** — Test the endpoints:
+
+```bash
+curl http://localhost:8080/health
+curl http://localhost:8080/api/info
+curl http://localhost:8080/api/time
+```
+
+**Step 5** — Open the ExeWatch dashboard to see logs, timings, and metrics appear in real time.
+
+## Available Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -21,80 +33,47 @@ This sample application showcases how to integrate ExeWatch into a Delphi WebBro
 | `/api/info` | GET | Application information |
 | `/api/echo` | POST | Echo back the request |
 | `/api/time` | GET | Current server timestamp |
-| `/api/delay` | GET | Simulate slow response (optional `?ms=500` parameter) |
+| `/api/delay` | GET | Simulate slow response (`?ms=500`) |
 
-## Building
+## How It Works
 
-```bash
-cd C:\DEV\exewatchsamples\DelphiWebBroker
-"C:\Program Files (x86)\Embarcadero\Studio\23.0\bin\dcc32.exe" -B -W- WebBrokerSample.dpr
-```
+The WebModule wraps every request through `HandleRequest`, which:
 
-## Running
+1. Increments `http.requests` counter
+2. Adds a breadcrumb for the request
+3. Starts timing the endpoint
+4. Executes the handler
+5. Records timing (success or failure)
 
-```bash
-WebBrokerSample.exe
-```
-
-The server starts automatically on port 8080.
-
-To change the port:
-
-```bash
-WebBrokerSample.exe -p 9000
-```
-
-Press Ctrl+C to stop the server.
-
-## ExeWatch Integration Details
-
-### Initialization
-
-The SDK is initialized in `WebBrokerSample.dpr`:
+On errors: increments `http.errors` counter, logs the exception, returns HTTP 500.
 
 ```pascal
-InitializeExeWatch(TExeWatchConfig.Create(
-  'YOUR_API_KEY',
-  'demo_customer'
-));
-EW.SetTag('app', 'WebBrokerSample');
-EW.SetTag('platform', 'Delphi');
-EW.IncrementCounter('http.requests', 0);
-EW.IncrementCounter('http.errors', 0);
+function TWebModule1.HandleRequest(Request: TWebRequest; Response: TWebResponse;
+  const Endpoint: string; Handler: TProc): Boolean;
+begin
+  Result := True;
+  EW.IncrementCounter('http.requests', 1);
+  EW.AddBreadcrumb('request: ' + Endpoint, 'http');
+  EW.StartTiming(Endpoint);
+  try
+    Handler;
+    EW.EndTiming(Endpoint, nil, True);
+  except
+    on E: Exception do
+    begin
+      EW.IncrementCounter('http.errors', 1);
+      EW.EndTiming(Endpoint, nil, False);
+      EW.ErrorWithException(E, Endpoint);
+      Response.StatusCode := 500;
+    end;
+  end;
+end;
 ```
-
-### Request Handling
-
-Every request goes through `HandleRequest` which:
-
-1. Increments the request counter
-2. Adds a breadcrumb for the request
-3. Starts timing the request
-4. Executes the handler
-5. Records the timing result (success/failure)
-
-### Error Handling
-
-If an exception occurs:
-
-- Error counter is incremented
-- Exception is logged with full details
-- Error breadcrumb is added
-- HTTP 500 response is returned
-
-### Metrics
-
-Two counters are tracked:
-
-- `http.requests` - Total number of HTTP requests
-- `http.errors` - Total number of errors
-
-These are automatically flushed to ExeWatch every 30 seconds.
 
 ## Files
 
-- `WebBrokerSample.dpr` - Main program
-- `WebModuleU.pas` - WebModule with endpoints and ExeWatch integration
-- `WebModuleU.dfm` - Action definitions
-- `ExeWatchSDKv1.pas` - ExeWatch SDK
-- `ServerConstU.pas` - Server constants
+| File | Role |
+|------|------|
+| `WebBrokerSample.dpr` | Main program — initializes SDK, starts server |
+| `WebModuleU.pas` | WebModule — endpoints and ExeWatch integration |
+| `ServerConstU.pas` | Server string constants |
