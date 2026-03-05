@@ -7,7 +7,7 @@
     <RootNamespace>ExeWatch</RootNamespace>
     <AssemblyName>ExeWatch</AssemblyName>
     <Version>0.4.0</Version>
-    <Description>ExeWatch SDK for .NET - Application Performance Monitoring for desktop applications</Description>
+    <Description>ExeWatch SDK for .NET - Application Performance Monitoring for server, desktop, mobile, and web applications</Description>
     <Authors>ExeWatch</Authors>
   </PropertyGroup>
 
