@@ -86,7 +86,8 @@ modules/
 
 # ---> .NET / C#
 # Build output
-bin/
+DotNet*/bin/
+DotNet*/obj/
 obj/
 
 # Visual Studio

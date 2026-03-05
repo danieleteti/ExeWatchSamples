@@ -1,0 +1,89 @@
+<div class="section">
+    <h2>Report Generation</h2>
+    <p class="section-desc">
+        Each report runs multiple steps with <strong>nested timings</strong>. ExeWatch captures the total
+        duration and each sub-step, so you can identify exactly which part is slow.
+        Some reports can randomly fail, producing errors in the dashboard.
+    </p>
+
+    <div class="card-grid">
+        <!-- Sales Report -->
+        <div class="action-card">
+            <div class="action-card-header">
+                <h3>Sales Report</h3>
+                <span class="badge badge-success">4 steps</span>
+            </div>
+            <p>Heavy report with 4 nested timings: query orders, aggregate revenue,
+               render charts, export PDF. Total: 1-3 seconds.</p>
+            <div class="action-card-tags">
+                <span class="tag">report.sales</span>
+                <span class="tag">report.sales.query_orders</span>
+                <span class="tag">report.sales.render_charts</span>
+            </div>
+            <button class="btn btn-primary"
+                    hx-post="/web/reports/sales"
+                    hx-target="#report-result"
+                    hx-swap="innerHTML"
+                    hx-indicator="#sales-spinner">
+                Generate
+                <span id="sales-spinner" class="htmx-indicator spinner"></span>
+            </button>
+        </div>
+
+        <!-- Inventory Report -->
+        <div class="action-card">
+            <div class="action-card-header">
+                <h3>Inventory Report</h3>
+                <span class="badge badge-warning">30% fail rate</span>
+            </div>
+            <p>Calls a warehouse API that is sometimes down (503).
+               When it fails, the timing is marked as failed and an ERROR is logged.</p>
+            <div class="action-card-tags">
+                <span class="tag">report.inventory</span>
+                <span class="tag">report.inventory.warehouse_api</span>
+            </div>
+            <button class="btn btn-primary"
+                    hx-post="/web/reports/inventory"
+                    hx-target="#report-result"
+                    hx-swap="innerHTML"
+                    hx-indicator="#inv-spinner">
+                Generate
+                <span id="inv-spinner" class="htmx-indicator spinner"></span>
+            </button>
+        </div>
+
+        <!-- Audit Report -->
+        <div class="action-card">
+            <div class="action-card-header">
+                <h3>Audit Report</h3>
+                <span class="badge badge-info">4 sources</span>
+            </div>
+            <p>Aggregates data from 4 sources. Slow queries trigger warnings.
+               Compliance checks can find violations (logged as warnings).</p>
+            <div class="action-card-tags">
+                <span class="tag">report.audit</span>
+                <span class="tag">report.audit.transactions</span>
+                <span class="tag">report.audit.compliance_check</span>
+            </div>
+            <button class="btn btn-primary"
+                    hx-post="/web/reports/audit"
+                    hx-target="#report-result"
+                    hx-swap="innerHTML"
+                    hx-indicator="#audit-spinner">
+                Generate
+                <span id="audit-spinner" class="htmx-indicator spinner"></span>
+            </button>
+        </div>
+    </div>
+
+    <div id="report-result" class="result-area"></div>
+
+    <div class="info-box">
+        <strong>What to look for in ExeWatch:</strong>
+        <ul>
+            <li><strong>Timing page</strong> — Each report and its sub-steps appear as separate entries. Compare avg/P95 to find bottlenecks.</li>
+            <li><strong>Logs page</strong> — Filter by tag "reports" to see INFO, WARNING, and ERROR messages.</li>
+            <li><strong>Breadcrumbs</strong> — Click any log entry to see the breadcrumb trail leading to it.</li>
+        </ul>
+    </div>
+</div>

@@ -1,0 +1,53 @@
+<div class="section">
+    <h2>People Management</h2>
+    <p class="section-desc">
+        Every CRUD operation is logged to ExeWatch with timing,
+        breadcrumbs, and structured messages. Try searching, adding,
+        deleting, and importing to see the activity in your dashboard.
+    </p>
+
+    <!-- Search -->
+    <div class="search-row">
+        <input type="search" name="q" placeholder="Search people..."
+               class="input input-search"
+               hx-get="/web/people/search"
+               hx-trigger="keyup changed delay:400ms"
+               hx-target="#people-table-container"
+               hx-swap="innerHTML"
+               hx-indicator="#search-spinner">
+        <span id="search-spinner" class="htmx-indicator spinner"></span>
+    </div>
+
+    <!-- Add Person Form -->
+    <form hx-post="/web/people"
+          hx-target="#people-table-container"
+          hx-swap="innerHTML"
+          class="add-form">
+        <input type="text" name="firstname" placeholder="First name" required class="input">
+        <input type="text" name="lastname" placeholder="Last name" required class="input">
+        <button type="submit" class="btn btn-primary">Add Person</button>
+        <button type="button" class="btn btn-info"
+                hx-post="/web/people/import"
+                hx-target="#people-table-container"
+                hx-swap="innerHTML"
+                hx-indicator="#import-spinner"
+                hx-confirm="Import 10 random people? Some may fail (~20% rate).">
+            Batch Import (10)
+            <span id="import-spinner" class="htmx-indicator spinner"></span>
+        </button>
+    </form>
+
+    <!-- People Table -->
+    <div id="people-table-container">
+        {{include "people_table.html"}}
+    </div>
+</div>
+
+<div class="info-box">
+    <strong>What to look for in ExeWatch:</strong>
+    <ul>
+        <li><strong>Logs page</strong> — Filter by tag "people" to see CRUD activity.</li>
+        <li><strong>Timing page</strong> — "people.search" and "people.batch_import" entries show search and import performance.</li>
+        <li><strong>Batch Import</strong> — Generates warnings for failed rows and an overall timing. ~20% of rows fail randomly.</li>
+    </ul>
+</div>

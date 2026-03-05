@@ -1,0 +1,110 @@
+<div class="section">
+    <h2>External Service Calls</h2>
+    <p class="section-desc">
+        Real applications depend on external services. These simulations show how ExeWatch tracks
+        each call with <strong>timing</strong>, <strong>success/failure counters</strong>, and
+        <strong>error logging</strong> — so you know exactly which service is causing problems.
+    </p>
+
+    <div class="card-grid">
+        <!-- Payment Gateway -->
+        <div class="action-card">
+            <div class="action-card-header">
+                <h3>Payment Gateway</h3>
+                <span class="badge badge-warning">40% fail</span>
+            </div>
+            <p>Simulates a payment of EUR 149.99. Can succeed (60%), timeout after 4s (20%),
+               be declined (15%), or return a 502 error (5%).</p>
+            <div class="action-card-tags">
+                <span class="tag">service.payment_gateway</span>
+                <span class="tag">payment.success</span>
+                <span class="tag">payment.timeout</span>
+            </div>
+            <button class="btn btn-primary"
+                    hx-post="/web/services/payment"
+                    hx-target="#service-result"
+                    hx-swap="innerHTML"
+                    hx-indicator="#pay-spinner">
+                Process Payment
+                <span id="pay-spinner" class="htmx-indicator spinner"></span>
+            </button>
+        </div>
+
+        <!-- Email Service -->
+        <div class="action-card">
+            <div class="action-card-header">
+                <h3>Email Service</h3>
+                <span class="badge badge-info">25% fail</span>
+            </div>
+            <p>Sends an order confirmation email. Can be rate-limited (429) or
+               fail with an SMTP connection error after 2s timeout.</p>
+            <div class="action-card-tags">
+                <span class="tag">service.email</span>
+                <span class="tag">email.sent</span>
+                <span class="tag">email.rate_limited</span>
+            </div>
+            <button class="btn btn-primary"
+                    hx-post="/web/services/email"
+                    hx-target="#service-result"
+                    hx-swap="innerHTML"
+                    hx-indicator="#email-spinner">
+                Send Email
+                <span id="email-spinner" class="htmx-indicator spinner"></span>
+            </button>
+        </div>
+
+        <!-- Geocoding API -->
+        <div class="action-card">
+            <div class="action-card-header">
+                <h3>Geocoding API</h3>
+                <span class="badge badge-success">~85% OK</span>
+            </div>
+            <p>Geocodes an address. Has a 15% cache hit (very fast), normal responses,
+               and occasional quota-exceeded errors.</p>
+            <div class="action-card-tags">
+                <span class="tag">service.geocoding</span>
+                <span class="tag">geocoding.cache_hit</span>
+                <span class="tag">geocoding.quota_exceeded</span>
+            </div>
+            <button class="btn btn-primary"
+                    hx-post="/web/services/geocoding"
+                    hx-target="#service-result"
+                    hx-swap="innerHTML"
+                    hx-indicator="#geo-spinner">
+                Geocode Address
+                <span id="geo-spinner" class="htmx-indicator spinner"></span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Call All Services -->
+    <div class="section" style="margin-top: 25px;">
+        <h3>Service Orchestration</h3>
+        <p class="section-desc">
+            Calls 5 services sequentially inside a parent timing. Each service is timed
+            individually, and the parent timing captures the total duration. Failures are
+            counted and logged — exactly how a real microservice orchestrator works.
+        </p>
+        <button class="btn btn-info"
+                hx-post="/web/services/all"
+                hx-target="#service-result"
+                hx-swap="innerHTML"
+                hx-indicator="#all-spinner"
+                style="margin-bottom: 15px;">
+            Call All 5 Services
+            <span id="all-spinner" class="htmx-indicator spinner"></span>
+        </button>
+    </div>
+
+    <div id="service-result" class="result-area"></div>
+
+    <div class="info-box">
+        <strong>What to look for in ExeWatch:</strong>
+        <ul>
+            <li><strong>Timing page</strong> — Compare response times across services. Identify which ones are slowest.</li>
+            <li><strong>Metrics</strong> — Counter metrics like "payment.success", "payment.timeout", "email.rate_limited"
+                show trends over time.</li>
+            <li><strong>Logs page</strong> — Filter by tag "payment", "email", or "geocoding" to see per-service activity.</li>
+        </ul>
+    </div>
+</div>

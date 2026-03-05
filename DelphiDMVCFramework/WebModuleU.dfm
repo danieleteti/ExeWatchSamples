@@ -1,0 +1,7 @@
+﻿object MyWebModule: TMyWebModule
+  OldCreateOrder = False
+  OnCreate = WebModuleCreate
+  OnDestroy = WebModuleDestroy
+  Height = 230
+  Width = 415
+end

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Reports - ExeWatch + DMVCFramework Sample</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+</head>
+<body>
+    <div class="container">
+
+        <header>
+            <h1>ExeWatch + DMVCFramework</h1>
+            <p>Application Performance Monitoring for Delphi server applications</p>
+        </header>
+
+        <div class="content">
+            {{include "partials/nav.html"}}
+
+            <div id="main-content">
+                {{include "partials/reports_content.html"}}
+            </div>
+        </div>
+
+        {{include "partials/footer.html"}}
+    </div>
+</body>
+</html>

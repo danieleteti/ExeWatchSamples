@@ -1,0 +1,23 @@
+<nav class="nav-bar">
+    <a href="/web"
+       hx-get="/web"
+       hx-target="#main-content"
+       hx-push-url="true"
+       class="nav-link {{if page_title|eq,"Dashboard"}}active{{endif}}">Dashboard</a>
+    <a href="/web/people"
+       hx-get="/web/people"
+       hx-target="#main-content"
+       hx-push-url="true"
+       class="nav-link {{if page_title|eq,"People"}}active{{endif}}">People</a>
+    <a href="/web/reports"
+       hx-get="/web/reports"
+       hx-target="#main-content"
+       hx-push-url="true"
+       class="nav-link {{if page_title|eq,"Reports"}}active{{endif}}">Reports</a>
+    <a href="/web/services"
+       hx-get="/web/services"
+       hx-target="#main-content"
+       hx-push-url="true"
+       class="nav-link {{if page_title|eq,"Services"}}active{{endif}}">Services</a>
+    <a href="/web/api/health" class="nav-link" target="_blank">Health API</a>
+</nav>

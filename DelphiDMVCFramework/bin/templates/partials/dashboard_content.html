@@ -1,0 +1,115 @@
+<!-- Stats Cards -->
+<div class="stats-row">
+    <div class="stat-card">
+        <div class="stat-value">{{:request_count}}</div>
+        <div class="stat-label">Total Requests</div>
+    </div>
+    <div class="stat-card stat-card-error">
+        <div class="stat-value">{{:error_count}}</div>
+        <div class="stat-label">Errors</div>
+    </div>
+    <div class="stat-card stat-card-info">
+        <div class="stat-value">{{:current_time}}</div>
+        <div class="stat-label">Server Time</div>
+    </div>
+    <div class="stat-card stat-card-success">
+        <div class="stat-value">{{:dmvc_version}}</div>
+        <div class="stat-label">DMVC Version</div>
+    </div>
+</div>
+
+<!-- Quick Actions -->
+<div class="section">
+    <h2>Quick Actions</h2>
+    <p class="section-desc">
+        Click the buttons to generate events visible in your
+        <a href="https://exewatch.com" target="_blank">ExeWatch dashboard</a>.
+    </p>
+
+    <div class="button-row">
+        <button class="btn btn-danger"
+                hx-post="/web/simulate/error"
+                hx-target="#simulate-result"
+                hx-swap="innerHTML">
+            Simulate Error
+        </button>
+        <button class="btn btn-warning"
+                hx-post="/web/simulate/warning"
+                hx-target="#simulate-result"
+                hx-swap="innerHTML">
+            Simulate Warning
+        </button>
+        <button class="btn btn-info"
+                hx-post="/web/simulate/slow"
+                hx-target="#simulate-result"
+                hx-swap="innerHTML">
+            Simulate Slow Op
+        </button>
+    </div>
+    <div id="simulate-result" class="result-area"></div>
+</div>
+
+<!-- ExeWatch Integration Points -->
+<div class="section">
+    <h2>How ExeWatch Is Integrated</h2>
+
+    <div class="feature-grid">
+        <div class="feature-card">
+            <h3>Automatic Request Timing</h3>
+            <p>Every HTTP request is timed via <code>OnBeforeAction</code> /
+               <code>OnAfterAction</code>.</p>
+            <pre><code>EW.StartTiming(Endpoint, 'http');
+// ... request handled ...
+EW.EndTiming(Endpoint, nil, Success);</code></pre>
+        </div>
+
+        <div class="feature-card">
+            <h3>Nested Timings</h3>
+            <p>Reports use nested timings to measure each step
+               inside a parent operation.</p>
+            <pre><code>EW.StartTiming('report.sales', 'reports');
+  EW.StartTiming('report.sales.query', 'db');
+  // ...query...
+  EW.EndTiming('report.sales.query');
+EW.EndTiming('report.sales');</code></pre>
+        </div>
+
+        <div class="feature-card">
+            <h3>Breadcrumbs</h3>
+            <p>Each request adds a breadcrumb. Service calls add more,
+               creating a trail visible in the log detail.</p>
+            <pre><code>EW.AddBreadcrumb('GET /web/people', 'http');
+EW.AddBreadcrumb('Search: "Ford"', 'people');
+EW.AddBreadcrumb('Calling payment API', 'payment');</code></pre>
+        </div>
+
+        <div class="feature-card">
+            <h3>Counters</h3>
+            <p>Track business metrics: requests, errors, payments,
+               email deliveries, cache hits.</p>
+            <pre><code>EW.IncrementCounter('http.requests', 1);
+EW.IncrementCounter('payment.success', 1);
+EW.IncrementCounter('email.rate_limited', 1);</code></pre>
+        </div>
+
+        <div class="feature-card">
+            <h3>Structured Logging</h3>
+            <p>Every operation is logged with a tag. Use tags to
+               filter on the ExeWatch Logs page.</p>
+            <pre><code>EW.Info('Payment processed: EUR 149.99', 'payment');
+EW.Warning('Slow query: > 1s', 'reports');
+EW.ErrorWithException(E, 'email');</code></pre>
+        </div>
+
+        <div class="feature-card">
+            <h3>Exception Handler</h3>
+            <p>Unhandled exceptions are caught globally and sent
+               to ExeWatch with full details.</p>
+            <pre><code>fMVC.SetExceptionHandler(
+  procedure(E: Exception; ...)
+  begin
+    EW.ErrorWithException(E, 'unhandled');
+  end);</code></pre>
+        </div>
+    </div>
+</div>
