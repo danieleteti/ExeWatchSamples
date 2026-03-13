@@ -38,6 +38,7 @@ This is enough for personal projects and small commercial applications. Sign up 
 | Sample | Description | Details |
 |--------|-------------|---------|
 | [Delphi VCL](DelphiVCL/) | Windows desktop app with buttons for every SDK feature: logging, timing, breadcrumbs, user identity, tags, metrics, and automatic VCL exception capture. | [README](DelphiVCL/README.md) |
+| [Delphi FMX](DelphiFMX/) | Cross-platform FireMonkey app — same feature coverage as the VCL sample but using the FMX framework. Uses `ExeWatchSDKv1.FMX` for GUI exception capture. Can target Windows, macOS, Linux, iOS, and Android. | [README](DelphiFMX/README.md) |
 | [Delphi WebBroker](DelphiWebBroker/) | REST API server that wraps every HTTP request with ExeWatch timing, error tracking, and request counters. 6 demo endpoints included. | [README](DelphiWebBroker/README.md) |
 | [Delphi DMVCFramework](DelphiDMVCFramework/) | Full web app with TemplatePro + HTMX. People CRUD, heavy reports with nested timings, simulated external services with realistic failures, batch imports with structured extra data, breadcrumb trails, counters, and periodic gauges. The most complete server-side sample. | [README](DelphiDMVCFramework/README.md) |
 

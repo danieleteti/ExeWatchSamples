@@ -1,0 +1,229 @@
+object MainForm: TMainForm
+  Left = 0
+  Top = 0
+  Caption = 'ExeWatch :: FMX Sample'
+  ClientHeight = 685
+  ClientWidth = 720
+  Position = ScreenCenter
+  FormFactor.Width = 320
+  FormFactor.Height = 480
+  FormFactor.Devices = [Desktop]
+  OnCreate = FormCreate
+  DesignerMasterStyle = 0
+  object grpLogging: TGroupBox
+    Position.X = 16.000000000000000000
+    Position.Y = 8.000000000000000000
+    Size.Width = 688.000000000000000000
+    Size.Height = 70.000000000000000000
+    Size.PlatformDefault = False
+    Text = 'Logging'
+    TabOrder = 0
+    object btnDebug: TButton
+      Position.X = 16.000000000000000000
+      Position.Y = 26.000000000000000000
+      Size.Width = 120.000000000000000000
+      Size.Height = 33.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 0
+      Text = 'Debug'
+      OnClick = btnDebugClick
+    end
+    object btnInfo: TButton
+      Position.X = 148.000000000000000000
+      Position.Y = 26.000000000000000000
+      Size.Width = 120.000000000000000000
+      Size.Height = 33.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 1
+      Text = 'Info'
+      OnClick = btnInfoClick
+    end
+    object btnWarning: TButton
+      Position.X = 280.000000000000000000
+      Position.Y = 26.000000000000000000
+      Size.Width = 120.000000000000000000
+      Size.Height = 33.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 2
+      Text = 'Warning'
+      OnClick = btnWarningClick
+    end
+    object btnError: TButton
+      Position.X = 412.000000000000000000
+      Position.Y = 26.000000000000000000
+      Size.Width = 120.000000000000000000
+      Size.Height = 33.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 3
+      Text = 'Error'
+      OnClick = btnErrorClick
+    end
+    object btnFatal: TButton
+      Position.X = 544.000000000000000000
+      Position.Y = 26.000000000000000000
+      Size.Width = 120.000000000000000000
+      Size.Height = 33.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 4
+      Text = 'Fatal'
+      OnClick = btnFatalClick
+    end
+  end
+  object grpTiming: TGroupBox
+    Position.X = 16.000000000000000000
+    Position.Y = 86.000000000000000000
+    Size.Width = 336.000000000000000000
+    Size.Height = 70.000000000000000000
+    Size.PlatformDefault = False
+    Text = 'Timing'
+    TabOrder = 1
+    object btnTiming: TButton
+      Position.X = 16.000000000000000000
+      Position.Y = 26.000000000000000000
+      Size.Width = 200.000000000000000000
+      Size.Height = 33.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 0
+      Text = 'Measure Operation'
+      OnClick = btnTimingClick
+    end
+  end
+  object grpBreadcrumbs: TGroupBox
+    Position.X = 368.000000000000000000
+    Position.Y = 86.000000000000000000
+    Size.Width = 336.000000000000000000
+    Size.Height = 70.000000000000000000
+    Size.PlatformDefault = False
+    Text = 'Breadcrumbs + Error'
+    TabOrder = 2
+    object btnBreadcrumbsError: TButton
+      Position.X = 16.000000000000000000
+      Position.Y = 26.000000000000000000
+      Size.Width = 260.000000000000000000
+      Size.Height = 33.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 0
+      Text = 'Trigger Error with Breadcrumbs'
+      OnClick = btnBreadcrumbsErrorClick
+    end
+  end
+  object grpUser: TGroupBox
+    Position.X = 16.000000000000000000
+    Position.Y = 164.000000000000000000
+    Size.Width = 336.000000000000000000
+    Size.Height = 70.000000000000000000
+    Size.PlatformDefault = False
+    Text = 'User Identity'
+    TabOrder = 3
+    object btnSetUser: TButton
+      Position.X = 16.000000000000000000
+      Position.Y = 26.000000000000000000
+      Size.Width = 145.000000000000000000
+      Size.Height = 33.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 0
+      Text = 'Set User'
+      OnClick = btnSetUserClick
+    end
+    object btnClearUser: TButton
+      Position.X = 173.000000000000000000
+      Position.Y = 26.000000000000000000
+      Size.Width = 145.000000000000000000
+      Size.Height = 33.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 1
+      Text = 'Clear User'
+      OnClick = btnClearUserClick
+    end
+  end
+  object grpTags: TGroupBox
+    Position.X = 368.000000000000000000
+    Position.Y = 164.000000000000000000
+    Size.Width = 336.000000000000000000
+    Size.Height = 70.000000000000000000
+    Size.PlatformDefault = False
+    Text = 'Additional Tags'
+    TabOrder = 4
+    object btnSetTags: TButton
+      Position.X = 16.000000000000000000
+      Position.Y = 26.000000000000000000
+      Size.Width = 145.000000000000000000
+      Size.Height = 33.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 0
+      Text = 'Set Tags'
+      OnClick = btnSetTagsClick
+    end
+    object btnClearTags: TButton
+      Position.X = 173.000000000000000000
+      Position.Y = 26.000000000000000000
+      Size.Width = 145.000000000000000000
+      Size.Height = 33.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 1
+      Text = 'Clear Tags'
+      OnClick = btnClearTagsClick
+    end
+  end
+  object grpMetrics: TGroupBox
+    Position.X = 16.000000000000000000
+    Position.Y = 242.000000000000000000
+    Size.Width = 688.000000000000000000
+    Size.Height = 70.000000000000000000
+    Size.PlatformDefault = False
+    Text = 'Metrics'
+    TabOrder = 5
+    object btnIncrementCounter: TButton
+      Position.X = 16.000000000000000000
+      Position.Y = 26.000000000000000000
+      Size.Width = 160.000000000000000000
+      Size.Height = 33.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 0
+      Text = 'Increment Counter'
+      OnClick = btnIncrementCounterClick
+    end
+    object btnRecordGauge: TButton
+      Position.X = 188.000000000000000000
+      Position.Y = 26.000000000000000000
+      Size.Width = 160.000000000000000000
+      Size.Height = 33.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 1
+      Text = 'Record Gauge'
+      OnClick = btnRecordGaugeClick
+    end
+  end
+  object lblLog: TLabel
+    Position.X = 16.000000000000000000
+    Position.Y = 327.000000000000000000
+    Text = 'Activity Log'
+    TabOrder = 8
+  end
+  object btnClearLog: TButton
+    Position.X = 640.000000000000000000
+    Position.Y = 322.000000000000000000
+    Size.Width = 64.000000000000000000
+    Size.Height = 25.000000000000000000
+    Size.PlatformDefault = False
+    TabOrder = 6
+    Text = 'Clear'
+    OnClick = btnClearLogClick
+  end
+  object Memo1: TMemo
+    Touch.InteractiveGestures = [Pan, LongTap, DoubleTap]
+    DataDetectorTypes = []
+    ReadOnly = True
+    TextSettings.Font.Family = 'Consolas'
+    TextSettings.Font.Size = 11.000000000000000000
+    Anchors = [akLeft, akTop, akRight, akBottom]
+    Position.X = 16.000000000000000000
+    Position.Y = 348.000000000000000000
+    Size.Width = 688.000000000000000000
+    Size.Height = 325.000000000000000000
+    Size.PlatformDefault = False
+    TabOrder = 7
+    Viewport.Width = 684.000000000000000000
+    Viewport.Height = 321.000000000000000000
+  end
+end
