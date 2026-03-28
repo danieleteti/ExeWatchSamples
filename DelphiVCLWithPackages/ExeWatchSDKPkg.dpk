@@ -1,0 +1,50 @@
+{ ============================================================================
+  ExeWatchSDKPkg - ExeWatch SDK Runtime Package
+
+  This package wraps the ExeWatch SDK so that the global EW instance
+  is shared across the host application and all dynamically loaded
+  module packages.
+
+  BUILD ORDER: Build this package FIRST, before any module packages.
+  ============================================================================ }
+
+package ExeWatchSDKPkg;
+
+{$R *.res}
+{$IFDEF IMPLICITBUILDING This IFDEF should not be used by users}
+{$ALIGN 8}
+{$ASSERTIONS ON}
+{$BOOLEVAL OFF}
+{$DEBUGINFO OFF}
+{$EXTENDEDSYNTAX ON}
+{$IMPORTEDDATA ON}
+{$IOCHECKS ON}
+{$LOCALSYMBOLS ON}
+{$LONGSTRINGS ON}
+{$OPENSTRINGS ON}
+{$OPTIMIZATION OFF}
+{$OVERFLOWCHECKS ON}
+{$RANGECHECKS ON}
+{$REFERENCEINFO ON}
+{$SAFEDIVIDE OFF}
+{$STACKFRAMES ON}
+{$TYPEDADDRESS OFF}
+{$VARSTRINGCHECKS ON}
+{$WRITEABLECONST OFF}
+{$MINENUMSIZE 1}
+{$IMAGEBASE $400000}
+{$DEFINE DEBUG}
+{$ENDIF IMPLICITBUILDING}
+{$RUNONLY}
+{$IMPLICITBUILD ON}
+
+requires
+  rtl,
+  vcl;
+
+contains
+  ModuleRegistryU in 'ModuleRegistryU.pas',
+  ExeWatchSDKv1 in '..\DelphiCommons\ExeWatchSDKv1.pas',
+  ExeWatchSDKv1.VCL in '..\DelphiCommons\ExeWatchSDKv1.VCL.pas';
+
+end.

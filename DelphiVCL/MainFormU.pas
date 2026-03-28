@@ -20,7 +20,7 @@ interface
 uses
   Winapi.Windows, Winapi.Messages, System.SysUtils, System.Variants,
   System.Classes, Vcl.Graphics, Vcl.Controls, Vcl.Forms, Vcl.Dialogs,
-  Vcl.StdCtrls;
+  Vcl.StdCtrls, Winapi.PsAPI, Vcl.ExtCtrls;
 
 type
   TMainForm = class(TForm)
@@ -41,12 +41,17 @@ type
     btnSetTags: TButton;
     btnClearTags: TButton;
     grpMetrics: TGroupBox;
-    btnIncrementCounter: TButton;
+    btnIncrementCounter1: TButton;
     btnRecordGauge: TButton;
     lblLog: TLabel;
     btnClearLog: TButton;
     Memo1: TMemo;
-    Button1: TButton;
+    btnSingleTiming: TButton;
+    Panel1: TPanel;
+    Shape1: TShape;
+    Label1: TLabel;
+    btnIncrementCounter2: TButton;
+    btnCounter3: TButton;
     procedure FormCreate(Sender: TObject);
     procedure btnDebugClick(Sender: TObject);
     procedure btnInfoClick(Sender: TObject);
@@ -59,11 +64,13 @@ type
     procedure btnClearUserClick(Sender: TObject);
     procedure btnSetTagsClick(Sender: TObject);
     procedure btnClearTagsClick(Sender: TObject);
-    procedure btnIncrementCounterClick(Sender: TObject);
+    procedure btnIncrementCounter1Click(Sender: TObject);
     procedure btnRecordGaugeClick(Sender: TObject);
     procedure btnClearLogClick(Sender: TObject);
+    procedure btnSingleTimingClick(Sender: TObject);
+    procedure btnIncrementCounter2Click(Sender: TObject);
+    procedure btnCounter3Click(Sender: TObject);
   private
-    FPageViewCount: Integer;
     procedure Log(const AMessage: string);
     procedure OnEWError(const ErrorMessage: string);
   end;
@@ -74,7 +81,6 @@ var
 implementation
 
 uses
-  Winapi.PsAPI,
   ExeWatchSDKv1;
 
 const
@@ -146,7 +152,6 @@ begin
   Randomize;
   Constraints.MaxWidth := Width;
   Memo1.Clear;
-  FPageViewCount := 0;
   Caption := Caption + ' - ExeWatch SDK ' + EXEWATCH_SDK_VERSION;
 
   // ---------------------------------------------------------------
@@ -279,18 +284,31 @@ end;
   - Use EW.CancelTiming('id') to discard a timing without sending it.
   ============================================================================ }
 procedure TMainForm.btnTimingClick(Sender: TObject);
-var
-  Duration: Integer;
-  Elapsed: Double;
 begin
-  Duration := 300 + Random(1200);
-  Log('Timing started - simulating ' + Duration.ToString + ' ms operation...');
+  for var I := 0 to 3 + Random(4) do
+  begin
+    var Duration := 100 + Random(1500);
+    const Operations = ['Customers Query', 'Invoices Aggregate', 'Create Reports'];
+    var TimingID := Operations[Random(Length(Operations))];
 
-  EW.StartTiming('simulated_operation', 'sample');
-  Sleep(Duration);  // Simulates a real operation (e.g. DB query, API call)
-  Elapsed := EW.EndTiming('simulated_operation');
+    Log('Timing started: Executing ' + TimingID + ' - simulating ' + Duration.ToString + ' ms operation...');
 
-  Log('Timing ended - ' + FormatFloat('0.0', Elapsed) + ' ms reported to ExeWatch');
+    EW.StartTiming(TimingID, 'sample');
+    try
+      Sleep(Duration);  // Simulates a real operation (e.g. DB query, API call)
+      if Random(10) > 7 then //Simulates an error
+        raise Exception.Create('Some Error Occurred');
+      EW.EndTiming(TimingID);
+      Log('Success');
+    except
+      on E: Exception do
+      begin
+        EW.EndTiming(TimingID, nil, False);
+        Log('Failed');
+//        raise;
+      end;
+    end;
+  end;
 end;
 
 { ============================================================================
@@ -324,17 +342,9 @@ begin
   Log('Breadcrumb: Clicked Save');
 
   // Simulate an exception — the breadcrumbs above will be attached to this error
-  try
-    raise Exception.Create('Save failed: invalid postal code');
-  except
-    on E: Exception do
-    begin
-      // ErrorWithException(E, tag) logs the exception class + message at Error level.
-      // The breadcrumb trail is automatically included.
-      EW.ErrorWithException(E, 'sample');
-      Log('[ERROR] ' + E.Message + ' - check dashboard for breadcrumb trail');
-    end;
-  end;
+  raise Exception.Create('Save failed: invalid postal code');
+
+  EW.ClearBreadcrumbs;
 end;
 
 { ============================================================================
@@ -360,12 +370,41 @@ begin
   Log('Sent a log - open the dashboard and check that this event includes the user');
 end;
 
+procedure TMainForm.btnSingleTimingClick(Sender: TObject);
+begin
+  var Duration := 100 + Random(1500);
+  Log('Timing started: Operation [Billing] simulating ' + Duration.ToString + ' ms operation...');
+
+
+
+  EW.StartTiming('Billing', 'billing');
+  try
+    Sleep(Duration);  // Simulates a real operation (e.g. DB query, API call)
+    //do somtehing
+    EW.EndTiming('Billing');
+    Log('Success');
+  except
+    on E: Exception do
+    begin
+      EW.EndTiming('Billing', nil, False);
+      Log('Failed');
+      raise;
+    end;
+  end;
+end;
+
 procedure TMainForm.btnClearUserClick(Sender: TObject);
 begin
   EW.ClearUser;
   EW.Info('User identity cleared', 'sample');
   Log('User cleared');
   Log('Sent a log - open the dashboard and verify this event has no user');
+end;
+
+procedure TMainForm.btnCounter3Click(Sender: TObject);
+begin
+  EW.IncrementCounter('orders.billed', 1, 'wharehouse');
+  Log('Counter incremented');
 end;
 
 { ============================================================================
@@ -439,13 +478,20 @@ end;
     60 seconds (counters as sum, gauges as min/max/avg/last).
   - In the dashboard you get charts with trends, min, max, avg, and last value.
   ============================================================================ }
-procedure TMainForm.btnIncrementCounterClick(Sender: TObject);
+procedure TMainForm.btnIncrementCounter1Click(Sender: TObject);
 begin
-  Inc(FPageViewCount);
   // IncrementCounter adds to the running total for this metric name.
   // The value parameter (default 1) is the amount to add.
-  EW.IncrementCounter('page_views', 1, 'sample');
-  Log('Counter incremented - page_views = ' + FPageViewCount.ToString);
+  EW.IncrementCounter('orders.new', 1, 'wharehouse');
+  Log('Counter incremented');
+end;
+
+procedure TMainForm.btnIncrementCounter2Click(Sender: TObject);
+begin
+  // IncrementCounter adds to the running total for this metric name.
+  // The value parameter (default 1) is the amount to add.
+  EW.IncrementCounter('orders.shipped', 1, 'sample');
+  Log('Counter incremented');
 end;
 
 procedure TMainForm.btnRecordGaugeClick(Sender: TObject);

@@ -41,12 +41,12 @@ uses
   System.Diagnostics;  // For TStopwatch (high-precision timing)
 
 const
-  EXEWATCH_SDK_VERSION = '0.18.2';
+  EXEWATCH_SDK_VERSION = '0.20.0';
   EXEWATCH_API_VERSION = 'v1';  // API version this SDK targets
   {$IF NOT DEFINED(LOCAL_EXEWATCH)}
   EXEWATCH_ENDPOINT = 'https://exewatch.com';
   {$ELSE}
-  EXEWATCH_ENDPOINT = 'http://localhost:8000';
+  EXEWATCH_ENDPOINT = 'http://192.168.1.110:8000';
   {$ENDIF}
   EXEWATCH_DEFAULT_BUFFER_SIZE = 100;
   EXEWATCH_DEFAULT_FLUSH_INTERVAL_MS = 5000;
@@ -350,6 +350,7 @@ type
     FCustomDeviceInfoLock: TCriticalSection;
     // Breadcrumbs (thread-local: each thread has its own breadcrumb trail)
     FBreadcrumbs: TDictionary<TThreadID, TList<TBreadcrumb>>;
+    FBreadcrumbOwners: TDictionary<TThreadID, Int64>; // generation ID — detects ThreadID reuse on Linux
     FBreadcrumbsLock: TCriticalSection;
     // Timing/Profiling
     FPendingTimings: TDictionary<string, TTimingEntry>;
@@ -722,6 +723,15 @@ function ExeWatchIsGUIApplication: Boolean;
 /// </summary>
 procedure ExeWatchRegisterFrameworkHook;
 
+// Internal: used by ExeWatchSDKv1.VCL/FMX hooks — not part of the public API
+function GetStackTraceStr(FramesToSkip: Integer = 0): string;
+function GetNoStackTraceReason: Integer;
+function GetLastExceptionStackTrace(E: Exception = nil): string;
+
+{$IFDEF EXEWATCH_TESTING}
+function EWGetStackTraceStr(FramesToSkip: Integer = 0): string;
+{$ENDIF}
+
 implementation
 
 uses
@@ -736,9 +746,35 @@ uses
   Posix.Unistd,
   Posix.Pwd,
 {$ENDIF}
+{$IFDEF ANDROID}
+  Posix.Unistd,
+  Posix.Pthread,
+  Androidapi.Helpers,
+  Androidapi.JNI.Os,
+  Androidapi.JNI.JavaTypes,
+  Androidapi.JNI.App,
+  Androidapi.JNI.GraphicsContentViewText,
+  Androidapi.JNIBridge,
+{$ENDIF}
   System.StrUtils,
   System.TimeSpan,
   System.NetConsts;
+
+{$IFDEF ANDROID}
+// gettid() returns the kernel thread ID (unique per thread, changes across process runs)
+// Available since Android API 17 (bionic libc)
+function gettid: Int32; cdecl; external 'libc.so' name 'gettid';
+{$ENDIF}
+
+// Cross-platform current thread ID
+function EWCurrentThreadId: UInt64; inline;
+begin
+  {$IFDEF ANDROID}
+  Result := UInt64(gettid);
+  {$ELSE}
+  Result := TThread.Current.ThreadID;
+  {$ENDIF}
+end;
 
 {$IFDEF MSWINDOWS}
 // Types for GetLogicalProcessorInformation (may not be in older Delphi)
@@ -810,6 +846,34 @@ var
   GOldExceptProc: procedure(ExceptObject: TObject; ExceptAddr: Pointer) = nil;
   GFrameworkHookInstalled: Boolean = False;
   GExceptionHandlingInProgress: Integer = 0;  // 0=false, 1=true - Integer for TInterlocked
+  // Breadcrumb thread ownership — atomic counter to detect ThreadID reuse on Linux
+  GBreadcrumbNextGen: Int64 = 0;
+
+threadvar
+  GMyBreadcrumbGen: Int64; // unique generation for current thread (0 = not assigned yet)
+  GLastExceptionStackTrace: string; // stack trace captured at raise time (for VCL/FMX hook)
+  GExceptionHookNesting: Integer; // prevent re-entry during stack capture
+
+
+{$IFDEF MSWINDOWS}
+var
+  GOldGetExceptionStackInfoProc: function(P: System.PExceptionRecord): Pointer = nil;
+
+function ExeWatchGetExceptionStackInfo(P: System.PExceptionRecord): Pointer;
+begin
+  if Assigned(GOldGetExceptionStackInfoProc) then
+    Result := GOldGetExceptionStackInfoProc(P)
+  else
+    Result := nil;
+
+  // Capture stack at raise time — called BEFORE SEH unwinding.
+  // Only capture if not already set — the first raise (user's) is the one we want.
+  // GetLastExceptionStackTrace clears it after consumption, allowing next capture.
+  if GLastExceptionStackTrace = '' then
+    GLastExceptionStackTrace := GetStackTraceStr(0);
+end;
+{$ENDIF}
+// Old code marker for deletion start
 
 // Forward declaration
 procedure CheckAndWarnAboutFrameworkHook; forward;
@@ -917,6 +981,9 @@ begin
       try
         ExtraData.AddPair('exception_address', Format('$%p', [ExceptAddr]));
         ExtraData.AddPair('exception_source', 'unhandled');
+        {$IFDEF MSWINDOWS}
+        ExtraData.AddPair('stack_trace', GetStackTraceStr(3));
+        {$ENDIF}
 
         if ExceptObject is Exception then
         begin
@@ -1063,7 +1130,7 @@ begin
   Result.Message := AMessage;
   Result.Tag := ATag;
   Result.Timestamp := TTimeZone.Local.ToUniversalTime(Now);
-  Result.ThreadId := TThread.CurrentThread.ThreadID;
+  Result.ThreadId := EWCurrentThreadId;
   Result.ProcessId := TExeWatchHelper.GetCurrentProcessId;
   Result.SessionId := ASessionId;
   Result.ExtraData := AExtraData;
@@ -1137,6 +1204,9 @@ begin
   {$IFDEF MSWINDOWS}
   Result.OSType := 'windows';
   {$ELSE}
+  {$IFDEF ANDROID}
+  Result.OSType := 'android';
+  {$ELSE}
   {$IFDEF LINUX}
   Result.OSType := 'linux';
   {$ELSE}
@@ -1144,6 +1214,7 @@ begin
   Result.OSType := 'macos';
   {$ELSE}
   Result.OSType := 'unknown';
+  {$ENDIF}
   {$ENDIF}
   {$ENDIF}
   {$ENDIF}
@@ -1484,6 +1555,99 @@ begin
   Result.AppVersionInfo := TAppVersionInfo.GetFromFile(ParamStr(0));
 end;
 {$ELSE}
+{$IFDEF ANDROID}
+var
+  ActivityManager: JObject;
+  MemInfo: JActivityManager_MemoryInfo;
+  Config: JConfiguration;
+  DensityDpi: Integer;
+begin
+  // Memory via ActivityManager
+  Result.TotalPhysicalMemory := 0;
+  Result.AvailablePhysicalMemory := 0;
+  try
+    ActivityManager := TAndroidHelper.Context.getSystemService(
+      TJContext.JavaClass.ACTIVITY_SERVICE);
+    if ActivityManager <> nil then
+    begin
+      MemInfo := TJActivityManager_MemoryInfo.JavaClass.init;
+      TJActivityManager.Wrap(ActivityManager).getMemoryInfo(MemInfo);
+      Result.TotalPhysicalMemory := MemInfo.totalMem;
+      Result.AvailablePhysicalMemory := MemInfo.availMem;
+    end;
+  except
+    // Ignore errors
+  end;
+
+  // CPU info from Build
+  try
+    Result.CPUName := JStringToString(TJBuild.JavaClass.HARDWARE);
+  except
+    Result.CPUName := '';
+  end;
+  Result.CPUCores := TThread.ProcessorCount;
+  Result.CPULogicalProcessors := TThread.ProcessorCount;
+
+  // CPU Architecture
+  {$IFDEF CPUARM64}
+  Result.CPUArchitecture := 'ARM64';
+  {$ELSE}
+  {$IFDEF CPUARM}
+  Result.CPUArchitecture := 'ARM';
+  {$ELSE}
+  Result.CPUArchitecture := 'Unknown';
+  {$ENDIF}
+  {$ENDIF}
+
+  SetLength(Result.Disks, 0);
+
+  // Screen info via Configuration (screenWidthDp * densityDpi / 160 = pixels)
+  SetLength(Result.Monitors, 1);
+  try
+    Config := TAndroidHelper.Context.getResources.getConfiguration;
+    DensityDpi := Config.densityDpi;
+    Result.Monitors[0].Index := 0;
+    Result.Monitors[0].Name := JStringToString(TJBuild.JavaClass.MODEL);
+    Result.Monitors[0].Width := (Config.screenWidthDp * DensityDpi) div 160;
+    Result.Monitors[0].Height := (Config.screenHeightDp * DensityDpi) div 160;
+    Result.Monitors[0].BitsPerPixel := 32;
+    Result.Monitors[0].Primary := True;
+  except
+    SetLength(Result.Monitors, 0);
+  end;
+
+  // Paths
+  Result.ExecutablePath := ParamStr(0);
+  Result.WorkingDirectory := '';
+  Result.CommandLine := '';
+
+  // Boot time not easily available
+  Result.SystemBootTime := 0;
+
+  SetLength(Result.LocalIPAddresses, 0);
+
+  // Timezone
+  try
+    Result.Timezone := TTimeZone.Local.DisplayName;
+  except
+    Result.Timezone := '';
+  end;
+
+  // Language/Locale
+  try
+    Result.SystemLanguage := JStringToString(
+      TJLocale.JavaClass.getDefault.getLanguage);
+    Result.SystemLocale := JStringToString(
+      TJLocale.JavaClass.getDefault.toString);
+  except
+    Result.SystemLanguage := '';
+    Result.SystemLocale := '';
+  end;
+
+  // App version from PackageManager (via GetAppVersionInfo)
+  Result.AppVersionInfo := TExeWatchHelper.GetAppVersionInfo;
+end;
+{$ELSE}
 {$IFDEF LINUX}
 var
   I: Integer;
@@ -1589,6 +1753,7 @@ begin
   Result.SystemLanguage := '';
   Result.SystemLocale := '';
 end;
+{$ENDIF}
 {$ENDIF}
 {$ENDIF}
 
@@ -1700,6 +1865,18 @@ begin
     Result := 'unknown';
 end;
 {$ELSE}
+{$IFDEF ANDROID}
+begin
+  // On Android, use the device model as hostname (e.g. "Pixel 7", "Galaxy S24")
+  try
+    Result := JStringToString(TJBuild.JavaClass.MODEL);
+    if Result = '' then
+      Result := 'unknown';
+  except
+    Result := 'unknown';
+  end;
+end;
+{$ELSE}
 {$IFDEF LINUX}
 var
   Buffer: array[0..255] of AnsiChar;
@@ -1719,6 +1896,7 @@ begin
 end;
 {$ENDIF}
 {$ENDIF}
+{$ENDIF}
 
 class function TExeWatchHelper.GetUsername: string;
 {$IFDEF MSWINDOWS}
@@ -1733,6 +1911,18 @@ begin
     Result := 'unknown';
 end;
 {$ELSE}
+{$IFDEF ANDROID}
+begin
+  // On Android, use the manufacturer as "username" (e.g. "samsung", "Google")
+  try
+    Result := JStringToString(TJBuild.JavaClass.MANUFACTURER);
+    if Result = '' then
+      Result := 'android';
+  except
+    Result := 'android';
+  end;
+end;
+{$ELSE}
 {$IFDEF LINUX}
 begin
   // Use USER environment variable (simple and reliable)
@@ -1744,6 +1934,7 @@ end;
 begin
   Result := 'unknown';
 end;
+{$ENDIF}
 {$ENDIF}
 {$ENDIF}
 
@@ -1769,9 +1960,18 @@ begin
     Result := IncludeTrailingPathDelimiter(TPath.GetTempPath) + 'ExeWatch' + PathDelim + 'pending';
 end;
 {$ELSE}
+{$IFDEF ANDROID}
+begin
+  // Use app's internal files directory (sandboxed, no permissions needed)
+  Result := IncludeTrailingPathDelimiter(
+    JStringToString(TAndroidHelper.Context.getFilesDir.getAbsolutePath))
+    + 'ExeWatch' + PathDelim + 'pending';
+end;
+{$ELSE}
 begin
   Result := IncludeTrailingPathDelimiter(TPath.GetTempPath) + 'ExeWatch' + PathDelim + 'pending';
 end;
+{$ENDIF}
 {$ENDIF}
 
 class function TExeWatchHelper.GetTimezoneOffset: string;
@@ -1815,8 +2015,30 @@ begin
 end;
 
 class function TExeWatchHelper.GetAppVersionInfo: TAppVersionInfo;
+{$IFDEF ANDROID}
+var
+  PackageInfo: JPackageInfo;
+  VersionStr: JString;
+{$ENDIF}
 begin
+  {$IFDEF ANDROID}
+  Result := Default(TAppVersionInfo);
+  try
+    PackageInfo := TAndroidHelper.Context.getPackageManager.getPackageInfo(
+      TAndroidHelper.Context.getPackageName, 0);
+    VersionStr := PackageInfo.versionName;
+    if VersionStr <> nil then
+    begin
+      Result.FileVersion := JStringToString(VersionStr);
+      Result.ProductVersion := Result.FileVersion;
+    end;
+    Result.ProductName := JStringToString(TAndroidHelper.Context.getPackageName);
+  except
+    // Ignore errors
+  end;
+  {$ELSE}
   Result := TAppVersionInfo.GetFromFile(ParamStr(0));
+  {$ENDIF}
 end;
 
 class function TExeWatchHelper.GetCurrentProcessId: Cardinal;
@@ -1824,11 +2046,11 @@ begin
   {$IFDEF MSWINDOWS}
   Result := Winapi.Windows.GetCurrentProcessId;
   {$ELSE}
-  {$IFDEF LINUX}
+  {$IF DEFINED(LINUX) OR DEFINED(ANDROID)}
   Result := Cardinal(Posix.Unistd.getpid);
   {$ELSE}
   Result := 0;
-  {$ENDIF}
+  {$IFEND}
   {$ENDIF}
 end;
 
@@ -1968,6 +2190,7 @@ begin
   FCustomDeviceInfoLock := TCriticalSection.Create;
   // Breadcrumbs
   FBreadcrumbs := TDictionary<TThreadID, TList<TBreadcrumb>>.Create;
+  FBreadcrumbOwners := TDictionary<TThreadID, Int64>.Create;
   FBreadcrumbsLock := TCriticalSection.Create;
   // Timing/Profiling
   FPendingTimings := TDictionary<string, TTimingEntry>.Create;
@@ -2112,6 +2335,7 @@ begin
     FBreadcrumbsLock.Leave;
   end;
   FBreadcrumbs.Free;
+  FBreadcrumbOwners.Free;
   FBreadcrumbsLock.Free;
 
   // Free TJSONObject instances inside pending timings
@@ -2983,7 +3207,7 @@ begin
             end
             else if IsMetricFile then
             begin
-              Accepted := ResponseJson.GetValue<Integer>('accepted', 0);
+              ResponseJson.GetValue<Integer>('accepted', 0);
               // Metric file sent successfully, no specific callback needed
             end
             else
@@ -3370,7 +3594,7 @@ procedure TExeWatch.Log(ALevel: TEWLogLevel; const AMessage, ATag: string;
   AExtraData: TJSONObject);
 begin
   // Delegate to the full overload with current timestamp and thread ID
-  Log(ALevel, AMessage, ATag, Now, TThread.Current.ThreadID, AExtraData);
+  Log(ALevel, AMessage, ATag, Now, EWCurrentThreadId, AExtraData);
 end;
 
 procedure TExeWatch.Log(ALevel: TEWLogLevel; const AMessage, ATag: string;
@@ -3383,6 +3607,7 @@ var
   IsErrorLevel: Boolean;
   TruncatedMessage: string;
   EffectiveBatchSize: Integer;
+  StackTrace: string;
 begin
   // Check both local and server-driven enabled flags
   if not FEnabled or not GetEffectiveEnabled then
@@ -3420,6 +3645,21 @@ begin
   // Notify listener for pass-through to other logging systems
   if Assigned(FClientListener) then
     FClientListener.OnExeWatchLog(ALevel, TruncatedMessage, ATag);
+
+  // Attach stack trace for ERROR/FATAL logs
+  if IsErrorLevel then
+  begin
+    if AExtraData = nil then
+      AExtraData := TJSONObject.Create;
+    if AExtraData.FindValue('stack_trace') = nil then
+    begin
+      StackTrace := GetStackTraceStr(3);
+      if StackTrace <> '' then
+        AExtraData.AddPair('stack_trace', StackTrace)
+      else
+        AExtraData.AddPair('no_stacktrace_reason', TJSONNumber.Create(GetNoStackTraceReason));
+    end;
+  end;
 
   // Build extra data with user, tags, release, and optionally breadcrumbs
   IncludeBreadcrumbs := IsErrorLevel;
@@ -3510,10 +3750,18 @@ procedure TExeWatch.ErrorWithException(E: Exception; const ATag,
 var
   ExtraData: TJSONObject;
   Msg: string;
+{$IFDEF MSWINDOWS}
+  StackTrace: string;
+{$ENDIF}
 begin
   ExtraData := TJSONObject.Create;
   ExtraData.AddPair('exception_class', E.ClassName);
   ExtraData.AddPair('exception_message', E.Message);
+  {$IFDEF MSWINDOWS}
+  // Capture stack trace — skip ErrorWithException itself
+  StackTrace := GetStackTraceStr(1);
+  ExtraData.AddPair('stack_trace', StackTrace);
+  {$ENDIF}
 
   if AAdditionalMessage <> '' then
     Msg := AAdditionalMessage + ': ' + E.Message
@@ -3635,7 +3883,8 @@ begin
     FBreadcrumbsLock.Enter;
     try
       ThreadId := TThread.Current.ThreadID;
-      if FBreadcrumbs.TryGetValue(ThreadId, ThreadBreadcrumbs) and (ThreadBreadcrumbs.Count > 0) then
+      if FBreadcrumbs.TryGetValue(ThreadId, ThreadBreadcrumbs) and (ThreadBreadcrumbs.Count > 0) and
+         (not FBreadcrumbOwners.ContainsKey(ThreadId) or (GMyBreadcrumbGen = 0) or (FBreadcrumbOwners[ThreadId] = GMyBreadcrumbGen)) then
       begin
         BreadcrumbsArray := TJSONArray.Create;
         for Breadcrumb in ThreadBreadcrumbs do
@@ -3671,11 +3920,26 @@ begin
 
   FBreadcrumbsLock.Enter;
   try
+    // Assign unique generation to this thread on first breadcrumb access
+    if GMyBreadcrumbGen = 0 then
+      GMyBreadcrumbGen := TInterlocked.Increment(GBreadcrumbNextGen);
+
     // Get or create breadcrumb list for current thread
     if not FBreadcrumbs.TryGetValue(ThreadId, ThreadBreadcrumbs) then
     begin
       ThreadBreadcrumbs := TList<TBreadcrumb>.Create;
       FBreadcrumbs.Add(ThreadId, ThreadBreadcrumbs);
+      FBreadcrumbOwners.AddOrSetValue(ThreadId, GMyBreadcrumbGen);
+    end
+    else
+    begin
+      // Detect ThreadID reuse (common on Linux) — clear stale breadcrumbs
+      if FBreadcrumbOwners.ContainsKey(ThreadId) and
+         (FBreadcrumbOwners[ThreadId] <> GMyBreadcrumbGen) then
+      begin
+        ThreadBreadcrumbs.Clear;
+        FBreadcrumbOwners[ThreadId] := GMyBreadcrumbGen;
+      end;
     end;
 
     ThreadBreadcrumbs.Add(Crumb);
@@ -3704,11 +3968,22 @@ var
 begin
   ThreadId := TThread.Current.ThreadID;
 
+  // Assign unique generation to this thread if not yet assigned
+  if GMyBreadcrumbGen = 0 then
+    GMyBreadcrumbGen := TInterlocked.Increment(GBreadcrumbNextGen);
+
   FBreadcrumbsLock.Enter;
   try
     // Return breadcrumbs only for current thread
     if FBreadcrumbs.TryGetValue(ThreadId, ThreadBreadcrumbs) then
-      Result := ThreadBreadcrumbs.ToArray
+    begin
+      // Detect ThreadID reuse — return empty if owner changed
+      if FBreadcrumbOwners.ContainsKey(ThreadId) and
+         (FBreadcrumbOwners[ThreadId] <> GMyBreadcrumbGen) then
+        SetLength(Result, 0)
+      else
+        Result := ThreadBreadcrumbs.ToArray;
+    end
     else
       SetLength(Result, 0); // No breadcrumbs for this thread
   finally
@@ -3735,6 +4010,7 @@ begin
       ThreadBreadcrumbs.Free;
       // Remove from dictionary
       FBreadcrumbs.Remove(ThreadId);
+      FBreadcrumbOwners.Remove(ThreadId);
     end;
   finally
     FBreadcrumbsLock.Leave;
@@ -3755,38 +4031,49 @@ var
   Entry: TTimingEntry;
   OldestId: string;
   OldEntry: TTimingEntry;
+  HasDuplicate: Boolean;
+  DuplicateEntry: TTimingEntry;
+  EvictedIds: TArray<string>;
+  EvictedValues: TArray<TTimingEntry>;
+  EvictedCount: Integer;
+  I: Integer;
+  AutoCloseDurationMs: Double;
+  AutoCloseExtraData: TJSONObject;
 begin
   if AId = '' then
     Exit;
 
   Entry := TTimingEntry.Create(ATag, AMetadata);
 
+  HasDuplicate := False;
+
   FPendingTimingsLock.Enter;
   try
-    // Check for duplicate - warn and overwrite
-    if FPendingTimings.ContainsKey(AId) then
+    // Check for duplicate - auto-close the previous timing before starting new one
+    if FPendingTimings.TryGetValue(AId, DuplicateEntry) then
     begin
-      // Free old metadata if present
-      if FPendingTimings.TryGetValue(AId, OldEntry) and (OldEntry.Metadata <> nil) then
-        OldEntry.Metadata.Free;
+      HasDuplicate := True;
       FPendingTimings.Remove(AId);
-      // Remove from stack too
       FTimingStack.Remove(AId);
-      // Internal warning
-      Log(llDebug, Format('StartTiming: Duplicate ID "%s", overwriting', [AId]), 'exewatch');
     end;
 
-    // Check max pending timings - remove oldest (FIFO)
+    // Check max pending timings - collect oldest entries for auto-close (FIFO)
+    EvictedCount := 0;
     while FPendingTimings.Count >= EXEWATCH_MAX_PENDING_TIMINGS do
     begin
       if FTimingStack.Count > 0 then
       begin
         OldestId := FTimingStack[0];
-        if FPendingTimings.TryGetValue(OldestId, OldEntry) and (OldEntry.Metadata <> nil) then
-          OldEntry.Metadata.Free;
-        FPendingTimings.Remove(OldestId);
+        if FPendingTimings.TryGetValue(OldestId, OldEntry) then
+        begin
+          SetLength(EvictedIds, EvictedCount + 1);
+          SetLength(EvictedValues, EvictedCount + 1);
+          EvictedIds[EvictedCount] := OldestId;
+          EvictedValues[EvictedCount] := OldEntry;
+          Inc(EvictedCount);
+          FPendingTimings.Remove(OldestId);
+        end;
         FTimingStack.Delete(0);
-        Log(llDebug, Format('StartTiming: Removed oldest timing "%s" (max reached)', [OldestId]), 'exewatch');
       end
       else
         Break;
@@ -3796,6 +4083,50 @@ begin
     FTimingStack.Add(AId);
   finally
     FPendingTimingsLock.Leave;
+  end;
+
+  // Auto-close entries OUTSIDE the lock (Log acquires other locks)
+
+  // Auto-close duplicate timing
+  if HasDuplicate then
+  begin
+    AutoCloseExtraData := TJSONObject.Create;
+    AutoCloseExtraData.AddPair('timing_type', 'duration');
+    AutoCloseExtraData.AddPair('timing_id', AId);
+    AutoCloseDurationMs := (TStopwatch.GetTimeStamp - DuplicateEntry.StartTicks)
+      / TStopwatch.Frequency * 1000;
+    AutoCloseExtraData.AddPair('duration_ms', TJSONNumber.Create(AutoCloseDurationMs));
+    AutoCloseExtraData.AddPair('success', TJSONBool.Create(False));
+    AutoCloseExtraData.AddPair('auto_closed', TJSONBool.Create(True));
+    AutoCloseExtraData.AddPair('auto_close_reason', 'duplicate_start');
+    if DuplicateEntry.Metadata <> nil then
+    begin
+      AutoCloseExtraData.AddPair('metadata', DuplicateEntry.Metadata.Clone as TJSONObject);
+      DuplicateEntry.Metadata.Free;
+    end;
+    Log(llWarning, Format('[TIMING] %s: %.2fms (auto-closed, duplicate StartTiming)', [AId, AutoCloseDurationMs]),
+      DuplicateEntry.Tag, AutoCloseExtraData);
+  end;
+
+  // Auto-close evicted timings (max pending reached)
+  for I := 0 to EvictedCount - 1 do
+  begin
+    AutoCloseExtraData := TJSONObject.Create;
+    AutoCloseExtraData.AddPair('timing_type', 'duration');
+    AutoCloseExtraData.AddPair('timing_id', EvictedIds[I]);
+    AutoCloseDurationMs := (TStopwatch.GetTimeStamp - EvictedValues[I].StartTicks)
+      / TStopwatch.Frequency * 1000;
+    AutoCloseExtraData.AddPair('duration_ms', TJSONNumber.Create(AutoCloseDurationMs));
+    AutoCloseExtraData.AddPair('success', TJSONBool.Create(False));
+    AutoCloseExtraData.AddPair('auto_closed', TJSONBool.Create(True));
+    AutoCloseExtraData.AddPair('auto_close_reason', 'max_pending_reached');
+    if EvictedValues[I].Metadata <> nil then
+    begin
+      AutoCloseExtraData.AddPair('metadata', EvictedValues[I].Metadata.Clone as TJSONObject);
+      EvictedValues[I].Metadata.Free;
+    end;
+    Log(llWarning, Format('[TIMING] %s: %.2fms (auto-closed, max pending timings reached)', [EvictedIds[I], AutoCloseDurationMs]),
+      EvictedValues[I].Tag, AutoCloseExtraData);
   end;
 end;
 
@@ -4370,15 +4701,506 @@ begin
   Result := FConfig.AppVersion;
 end;
 
+// ============================================================
+// Stack Trace Support (Windows only)
+// ============================================================
+
+{$IFDEF MSWINDOWS}
+{$STACKFRAMES ON}
+
+const
+  ST_MAX_FRAMES = 62;
+
+type
+  TSTSymbol = record
+    Address: NativeUInt;
+    Name: string;
+  end;
+
+  TSTLineInfo = record
+    Address: NativeUInt;
+    Line: Integer;
+    UnitName: string;
+  end;
+
+var
+  GSTSymbols: array of TSTSymbol;
+  GSTLines: array of TSTLineInfo;
+  GSTCodeBase: NativeUInt;
+  GSTSegOffsets: array[1..8] of NativeUInt;
+  GSTSegCount: Integer;
+  GSTLoaded: Boolean;
+  GSTInitialized: Boolean;
+  GSTProgramName: string;
+
+type
+  TRtlCaptureStackBackTrace = function(
+    FramesToSkip, FramesToCapture: ULONG;
+    BackTrace: Pointer; BackTraceHash: PULONG): USHORT; stdcall;
+
+var
+  GSTCapture: TRtlCaptureStackBackTrace = nil;
+
+procedure STSortSymbols;
+begin
+  if Length(GSTSymbols) > 1 then
+    TArray.Sort<TSTSymbol>(GSTSymbols, TComparer<TSTSymbol>.Construct(
+      function(const A, B: TSTSymbol): Integer
+      begin
+        if A.Address < B.Address then Result := -1
+        else if A.Address > B.Address then Result := 1
+        else Result := 0;
+      end));
+end;
+
+procedure STSortLines;
+begin
+  if Length(GSTLines) > 1 then
+    TArray.Sort<TSTLineInfo>(GSTLines, TComparer<TSTLineInfo>.Construct(
+      function(const A, B: TSTLineInfo): Integer
+      begin
+        if A.Address < B.Address then Result := -1
+        else if A.Address > B.Address then Result := 1
+        else Result := 0;
+      end));
+end;
+
+function STHexToNative(const S: string): NativeUInt;
+var
+  T: string;
+begin
+  T := Trim(S);
+  if T = '' then
+    Result := 0
+  else
+    Result := StrToInt64Def('$' + T, 0);
+end;
+
+function STSegOffset(SegNum: Integer): NativeUInt;
+begin
+  if (SegNum >= 1) and (SegNum <= GSTSegCount) then
+    Result := GSTSegOffsets[SegNum]
+  else
+    Result := 0;
+end;
+
+procedure STParseAddr(const S: string; out SegNum: Integer; out Addr: NativeUInt);
+var
+  ColonPos: Integer;
+begin
+  ColonPos := Pos(':', S);
+  if ColonPos > 0 then
+  begin
+    SegNum := StrToIntDef('$' + Copy(S, 1, ColonPos - 1), 0);
+    Addr := STHexToNative(Copy(S, ColonPos + 1, Length(S)));
+  end
+  else
+  begin
+    SegNum := 0;
+    Addr := 0;
+  end;
+end;
+
+procedure STGrowSymbols(var ACount: Integer);
+var
+  NewCap: Integer;
+begin
+  if ACount >= Length(GSTSymbols) then
+  begin
+    NewCap := Length(GSTSymbols);
+    if NewCap = 0 then NewCap := 1024
+    else NewCap := NewCap * 2;
+    SetLength(GSTSymbols, NewCap);
+  end;
+end;
+
+procedure STGrowLines(var ACount: Integer);
+var
+  NewCap: Integer;
+begin
+  if ACount >= Length(GSTLines) then
+  begin
+    NewCap := Length(GSTLines);
+    if NewCap = 0 then NewCap := 4096
+    else NewCap := NewCap * 2;
+    SetLength(GSTLines, NewCap);
+  end;
+end;
+
+// Extract next whitespace-delimited token from S starting at Pos (1-based).
+// Returns empty string if no more tokens. Updates Pos past the token.
+function STNextToken(const S: string; var P: Integer): string;
+var
+  Start, Len: Integer;
+begin
+  Len := Length(S);
+  // Skip whitespace
+  while (P <= Len) and (S[P] = ' ') do Inc(P);
+  if P > Len then begin Result := ''; Exit; end;
+  Start := P;
+  while (P <= Len) and (S[P] <> ' ') do Inc(P);
+  Result := Copy(S, Start, P - Start);
+end;
+
+procedure STLoadMap(const FileName: string);
+var
+  SL: TStringList;
+  I, K, P: Integer;
+  Line, UnitName, Tok1, Tok2, Tok3, Tok4: string;
+  EmptyCount, LineNum: Integer;
+  BaseAddr: NativeUInt;
+  SegNum: Integer;
+  SymCount, LineCount: Integer;
+begin
+  GSTLoaded := False;
+  SetLength(GSTSymbols, 0);
+  SetLength(GSTLines, 0);
+  FillChar(GSTSegOffsets, SizeOf(GSTSegOffsets), 0);
+  GSTSegCount := 0;
+  GSTProgramName := ChangeFileExt(ExtractFileName(FileName), '');
+
+  if not FileExists(FileName) then
+    Exit;
+
+  SymCount := 0;
+  LineCount := 0;
+
+  SL := TStringList.Create;
+  try
+    SL.LoadFromFile(FileName);
+    I := 0;
+    while I < SL.Count do
+    begin
+      Line := Trim(SL[I]);
+
+      // Main segments - capture offsets for ALL code segments
+      if Line.StartsWith('Start') and (Pos('Length', Line) > 0) and (Pos('Name', Line) > 0) then
+      begin
+        Inc(I);
+        while I < SL.Count do
+        begin
+          Line := Trim(SL[I]);
+          if Line = '' then begin Inc(I); Break; end;
+          P := 1;
+          Tok1 := STNextToken(Line, P);
+          Tok2 := STNextToken(Line, P);
+          Tok3 := STNextToken(Line, P);
+          Tok4 := STNextToken(Line, P);
+          if (Tok4 = 'CODE') or (Tok4 = 'ICODE') then
+          begin
+            STParseAddr(Tok1, SegNum, BaseAddr);
+            if (SegNum >= 1) and (SegNum <= High(GSTSegOffsets)) then
+            begin
+              GSTSegOffsets[SegNum] := BaseAddr and $FFFFF;
+              if SegNum > GSTSegCount then
+                GSTSegCount := SegNum;
+            end;
+          end;
+          Inc(I);
+        end;
+        Continue;
+      end;
+
+      // Publics by Value - store module-relative addresses
+      if Pos('Publics by Value', Line) > 0 then
+      begin
+        Inc(I);
+        EmptyCount := 0;
+        while I < SL.Count do
+        begin
+          Line := Trim(SL[I]);
+          if Line = '' then
+          begin
+            Inc(EmptyCount);
+            Inc(I);
+            if EmptyCount >= 2 then Break;
+            Continue;
+          end;
+          EmptyCount := 0;
+          if Line.StartsWith('Address') then begin Inc(I); Continue; end;
+          if Line.StartsWith('Line numbers') then Break;
+          P := 1;
+          Tok1 := STNextToken(Line, P);
+          Tok2 := STNextToken(Line, P);
+          if (Tok1 <> '') and (Tok2 <> '') then
+          begin
+            STParseAddr(Tok1, SegNum, BaseAddr);
+            if SegNum > 0 then
+            begin
+              STGrowSymbols(SymCount);
+              GSTSymbols[SymCount].Address := BaseAddr + STSegOffset(SegNum);
+              GSTSymbols[SymCount].Name := Tok2;
+              Inc(SymCount);
+            end;
+          end;
+          Inc(I);
+        end;
+        Continue;
+      end;
+
+      // Line numbers - store module-relative addresses
+      if Line.StartsWith('Line numbers for') then
+      begin
+        K := Pos('Line numbers for ', Line);
+        if K > 0 then
+        begin
+          UnitName := Copy(Line, K + 17, Length(Line));
+          K := Pos('(', UnitName);
+          if K > 0 then
+            UnitName := Copy(UnitName, 1, K - 1);
+          UnitName := Trim(UnitName);
+        end
+        else
+          UnitName := '';
+        Inc(I);
+        // Skip empty lines after header
+        while (I < SL.Count) and (Trim(SL[I]) = '') do Inc(I);
+        while I < SL.Count do
+        begin
+          Line := Trim(SL[I]);
+          if (Line = '') or Line.StartsWith('Line numbers for') then Break;
+          P := 1;
+          while True do
+          begin
+            Tok1 := STNextToken(Line, P);
+            Tok2 := STNextToken(Line, P);
+            if (Tok1 = '') or (Tok2 = '') then Break;
+            LineNum := StrToIntDef(Tok1, 0);
+            if LineNum > 0 then
+            begin
+              STParseAddr(Tok2, SegNum, BaseAddr);
+              if SegNum > 0 then
+              begin
+                STGrowLines(LineCount);
+                GSTLines[LineCount].Address := BaseAddr + STSegOffset(SegNum);
+                GSTLines[LineCount].Line := LineNum;
+                GSTLines[LineCount].UnitName := UnitName;
+                Inc(LineCount);
+              end;
+            end;
+          end;
+          Inc(I);
+        end;
+        Continue;
+      end;
+
+      Inc(I);
+    end;
+
+    // Trim to actual size
+    SetLength(GSTSymbols, SymCount);
+    SetLength(GSTLines, LineCount);
+
+    STSortSymbols;
+    STSortLines;
+    GSTLoaded := True;
+  finally
+    SL.Free;
+  end;
+end;
+
+function STFindSymbol(Address: NativeUInt): string;
+var
+  I: Integer;
+  RelAddr: NativeUInt;
+begin
+  Result := '';
+  if (Length(GSTSymbols) = 0) or (Address < GSTCodeBase) then Exit;
+  RelAddr := Address - GSTCodeBase;
+  if RelAddr > $1000000 then Exit;
+  for I := High(GSTSymbols) downto 0 do
+  begin
+    if GSTSymbols[I].Address <= RelAddr then
+      Exit(GSTSymbols[I].Name);
+  end;
+end;
+
+procedure STFindLine(Address: NativeUInt; out ALine: Integer; out AUnit: string);
+var
+  I: Integer;
+  RelAddr: NativeUInt;
+begin
+  ALine := 0;
+  AUnit := '';
+  if (Length(GSTLines) = 0) or (Address < GSTCodeBase) then Exit;
+  RelAddr := Address - GSTCodeBase;
+  if RelAddr > $1000000 then Exit;
+  for I := High(GSTLines) downto 0 do
+  begin
+    if GSTLines[I].Address <= RelAddr then
+    begin
+      ALine := GSTLines[I].Line;
+      AUnit := GSTLines[I].UnitName;
+      Exit;
+    end;
+  end;
+end;
+
+function STResolveAddr(Address: NativeUInt): string;
+var
+  SymName, LineUnit, FuncName: string;
+  LineNum: Integer;
+begin
+  SymName := STFindSymbol(Address);
+  STFindLine(Address, LineNum, LineUnit);
+
+  if (LineUnit <> '') and (SymName <> '') and SymName.StartsWith(LineUnit + '.') then
+  begin
+    FuncName := Copy(SymName, Length(LineUnit) + 2, MaxInt);
+    // Win32 Finalization fix
+    if (GSTProgramName <> '') and
+       SameText(LineUnit, GSTProgramName) and
+       SameText(FuncName, 'Finalization') then
+      FuncName := GSTProgramName;
+    if LineNum > 0 then
+      Result := Format('%s.%s (line %d)', [LineUnit, FuncName, LineNum])
+    else
+      Result := Format('%s.%s', [LineUnit, FuncName]);
+  end
+  else if (LineUnit <> '') and (LineNum > 0) then
+    Result := Format('%s (line %d)', [LineUnit, LineNum])
+  else
+    Result := Format('[%p]', [Pointer(Address)]);
+end;
+
+procedure STInitCapture;
+var
+  H: THandle;
+begin
+  H := GetModuleHandle('kernel32.dll');
+  if H <> 0 then
+    @GSTCapture := GetProcAddress(H, 'RtlCaptureStackBackTrace');
+end;
+
+procedure STEnsureInit;
+var
+  MapFile: string;
+begin
+  if GSTInitialized then Exit;
+  GSTInitialized := True;
+  STInitCapture;
+  GSTCodeBase := NativeUInt(HInstance);
+  MapFile := ChangeFileExt(GetModuleName(HInstance), '.map');
+  STLoadMap(MapFile);
+end;
+
+function IsRTLInternalFrame(const ALine: string): Boolean;
+begin
+  Result :=
+    // RTL / OS internals
+    (Pos('$unwind$', ALine) > 0) or
+    (Pos('$pdata$', ALine) > 0) or
+    (Pos('_RaiseExcept', ALine) > 0) or
+    (Pos('.RaiseExcept', ALine) > 0) or
+    (Pos('RaisingException', ALine) > 0) or
+    (Pos('RtlRaiseException', ALine) > 0) or
+    (Pos('RtlDispatchException', ALine) > 0) or
+    (Pos('NtRaiseException', ALine) > 0) or
+    (Pos('KiUserException', ALine) > 0) or
+    (Pos('RaiseException', ALine) > 0) or
+    (Pos('NotifyExceptFinally', ALine) > 0) or
+    (Pos('@RaiseExcept', ALine) > 0) or
+    (Pos('@HandleFinally', ALine) > 0) or
+    (Pos('@HandleAnyException', ALine) > 0) or
+    (Pos('@HandleOnException', ALine) > 0) or
+    // ExeWatch SDK internals
+    (Pos('ExeWatchGetExceptionStackInfo', ALine) > 0) or
+    (Pos('ScanStackForTrace', ALine) > 0) or
+    (Pos('GetStackTraceStr', ALine) > 0) or
+    (Pos('GetLastExceptionStackTrace', ALine) > 0) or
+    (Pos('STEnsureInit', ALine) > 0) or
+    (Pos('STResolveAddr', ALine) > 0) or
+    (Pos('STFindSymbol', ALine) > 0) or
+    (Pos('STFindLine', ALine) > 0);
+end;
+
+function GetStackTraceStr(FramesToSkip: Integer = 0): string;
+var
+  Frames: array[0..ST_MAX_FRAMES - 1] of Pointer;
+  Count, I: Integer;
+  SB: TStringBuilder;
+  S: string;
+begin
+  Result := '';
+  STEnsureInit;
+  if not Assigned(GSTCapture) then Exit;
+
+  FillChar(Frames, SizeOf(Frames), 0);
+  Count := GSTCapture(FramesToSkip + 1, ST_MAX_FRAMES, @Frames[0], nil);
+
+  if Count = 0 then Exit;
+
+  SB := TStringBuilder.Create;
+  try
+    for I := 0 to Count - 1 do
+    begin
+      if Frames[I] = nil then Continue;
+      S := STResolveAddr(NativeUInt(Frames[I]));
+      if IsRTLInternalFrame(S) then Continue;
+      if SB.Length > 0 then SB.AppendLine;
+      SB.Append(S);
+    end;
+    Result := SB.ToString;
+  finally
+    SB.Free;
+  end;
+end;
+
+function GetNoStackTraceReason: Integer;
+begin
+  if not Assigned(GSTCapture) then
+    Result := 1  // RtlCaptureStackBackTrace not available
+  else if not GSTLoaded then
+    Result := 2  // Map file not found
+  else
+    Result := 3; // Stack capture returned 0 frames
+end;
+
+{$ELSE}
+
+// Non-Windows stubs
+function GetStackTraceStr(FramesToSkip: Integer = 0): string;
+begin
+  Result := '';
+end;
+
+function GetNoStackTraceReason: Integer;
+begin
+  Result := 4; // Platform not supported (non-Windows)
+end;
+
+{$ENDIF}
+
+function GetLastExceptionStackTrace(E: Exception): string;
+begin
+  Result := GLastExceptionStackTrace;
+  GLastExceptionStackTrace := ''; // consume it
+end;
+
+{$IFDEF EXEWATCH_TESTING}
+function EWGetStackTraceStr(FramesToSkip: Integer = 0): string;
+begin
+  Result := GetStackTraceStr(FramesToSkip);
+end;
+{$ENDIF}
+
 initialization
   GExeWatchLock := TCriticalSection.Create;
   // Install exception handler
   GOldExceptProc := System.ExceptProc;
   System.ExceptProc := @ExeWatchExceptProc;
+  // Capture stack at raise time (Win64 only — table-based unwinding works)
+  {$IFDEF MSWINDOWS}
+  GOldGetExceptionStackInfoProc := Exception.GetExceptionStackInfoProc;
+  Exception.GetExceptionStackInfoProc := @ExeWatchGetExceptionStackInfo;
+  {$ENDIF}
 
 finalization
-  // Restore old exception handler
+  // Restore old handlers
   System.ExceptProc := @GOldExceptProc;
+  {$IFDEF MSWINDOWS}
+  Exception.GetExceptionStackInfoProc := GOldGetExceptionStackInfoProc;
+  {$ENDIF}
   FinalizeExeWatch;
   FreeAndNil(GExeWatchLock);
 

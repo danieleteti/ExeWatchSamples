@@ -53,6 +53,10 @@ begin
     try
       ExtraData.AddPair('exception_class', E.ClassName);
       ExtraData.AddPair('exception_source', 'fmx');
+      {$IFDEF MSWINDOWS}
+      // Use stack trace captured at raise time (not current FMX message loop stack)
+      ExtraData.AddPair('stack_trace', GetLastExceptionStackTrace(E));
+      {$ENDIF}
 
       ExeWatch.Log(llError, 'GUI exception: ' + E.Message, 'exception', ExtraData);
     except

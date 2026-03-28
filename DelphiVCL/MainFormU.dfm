@@ -1,9 +1,10 @@
 object MainForm: TMainForm
   Left = 0
   Top = 0
+  BorderStyle = bsDialog
   Caption = 'ExeWatch :: VCL Sample'
-  ClientHeight = 685
-  ClientWidth = 720
+  ClientHeight = 568
+  ClientWidth = 704
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
   Font.Color = clWindowText
@@ -13,19 +14,19 @@ object MainForm: TMainForm
   Position = poScreenCenter
   OnCreate = FormCreate
   DesignSize = (
-    720
-    685)
+    704
+    568)
   TextHeight = 15
   object lblLog: TLabel
-    Left = 16
-    Top = 327
+    Left = 8
+    Top = 379
     Width = 63
     Height = 15
     Caption = 'Activity Log'
   end
   object grpLogging: TGroupBox
-    Left = 16
-    Top = 8
+    Left = 8
+    Top = 66
     Width = 688
     Height = 70
     Caption = ' Logging '
@@ -77,25 +78,34 @@ object MainForm: TMainForm
     end
   end
   object grpTiming: TGroupBox
-    Left = 16
-    Top = 86
+    Left = 8
+    Top = 142
     Width = 336
     Height = 70
     Caption = ' Timing '
     TabOrder = 1
     object btnTiming: TButton
-      Left = 16
+      Left = 173
       Top = 26
-      Width = 200
+      Width = 145
       Height = 33
       Caption = 'Measure Operation'
       TabOrder = 0
       OnClick = btnTimingClick
     end
+    object btnSingleTiming: TButton
+      Left = 16
+      Top = 26
+      Width = 145
+      Height = 32
+      Caption = 'Single Operation'
+      TabOrder = 1
+      OnClick = btnSingleTimingClick
+    end
   end
   object grpBreadcrumbs: TGroupBox
-    Left = 368
-    Top = 86
+    Left = 360
+    Top = 142
     Width = 336
     Height = 70
     Caption = ' Breadcrumbs + Error '
@@ -111,8 +121,8 @@ object MainForm: TMainForm
     end
   end
   object grpUser: TGroupBox
-    Left = 16
-    Top = 164
+    Left = 8
+    Top = 218
     Width = 336
     Height = 70
     Caption = ' User Identity '
@@ -137,8 +147,8 @@ object MainForm: TMainForm
     end
   end
   object grpTags: TGroupBox
-    Left = 368
-    Top = 164
+    Left = 360
+    Top = 218
     Width = 336
     Height = 70
     Caption = ' Additional Tags '
@@ -163,34 +173,52 @@ object MainForm: TMainForm
     end
   end
   object grpMetrics: TGroupBox
-    Left = 16
-    Top = 242
+    Left = 8
+    Top = 294
     Width = 688
     Height = 70
     Caption = ' Metrics '
     TabOrder = 5
-    object btnIncrementCounter: TButton
+    object btnIncrementCounter1: TButton
       Left = 16
       Top = 26
-      Width = 160
+      Width = 161
       Height = 33
-      Caption = 'Increment Counter'
+      Caption = '+1 Counter (orders.new)'
       TabOrder = 0
-      OnClick = btnIncrementCounterClick
+      OnClick = btnIncrementCounter1Click
     end
     object btnRecordGauge: TButton
-      Left = 188
+      Left = 568
       Top = 26
-      Width = 160
+      Width = 102
       Height = 33
       Caption = 'Record Gauge'
       TabOrder = 1
       OnClick = btnRecordGaugeClick
     end
+    object btnIncrementCounter2: TButton
+      Left = 183
+      Top = 26
+      Width = 161
+      Height = 33
+      Caption = '+1 Counter (orders.shipped)'
+      TabOrder = 2
+      OnClick = btnIncrementCounter2Click
+    end
+    object btnCounter3: TButton
+      Left = 350
+      Top = 26
+      Width = 161
+      Height = 33
+      Caption = '+1 Counter (orders.billed)'
+      TabOrder = 3
+      OnClick = btnCounter3Click
+    end
   end
   object btnClearLog: TButton
-    Left = 640
-    Top = 322
+    Left = 632
+    Top = 369
     Width = 64
     Height = 25
     Caption = 'Clear'
@@ -198,10 +226,10 @@ object MainForm: TMainForm
     OnClick = btnClearLogClick
   end
   object Memo1: TMemo
-    Left = 16
-    Top = 348
+    Left = 8
+    Top = 400
     Width = 688
-    Height = 325
+    Height = 160
     Anchors = [akLeft, akTop, akRight, akBottom]
     Font.Charset = DEFAULT_CHARSET
     Font.Color = clWindowText
@@ -212,14 +240,55 @@ object MainForm: TMainForm
     ReadOnly = True
     ScrollBars = ssVertical
     TabOrder = 7
-    ExplicitHeight = 320
   end
-  object Button1: TButton
-    Left = 360
-    Top = 322
-    Width = 75
-    Height = 25
-    Caption = 'Button1'
+  object Panel1: TPanel
+    Left = 0
+    Top = 0
+    Width = 704
+    Height = 49
+    Align = alTop
+    BevelOuter = bvNone
+    Font.Charset = DEFAULT_CHARSET
+    Font.Color = clWindowText
+    Font.Height = -12
+    Font.Name = 'Segoe UI Light'
+    Font.Style = []
+    ParentFont = False
     TabOrder = 8
+    object Shape1: TShape
+      Left = 0
+      Top = 0
+      Width = 704
+      Height = 49
+      Align = alClient
+      Brush.Color = 9070355
+      Pen.Color = 15901513
+      Pen.Style = psClear
+      ExplicitLeft = 320
+      ExplicitTop = -16
+      ExplicitWidth = 65
+      ExplicitHeight = 65
+    end
+    object Label1: TLabel
+      AlignWithMargins = True
+      Left = 3
+      Top = 3
+      Width = 698
+      Height = 43
+      Align = alClient
+      Alignment = taCenter
+      Caption = 'ExeWatch | DelphiVCL Sample'
+      Color = clBlack
+      Font.Charset = DEFAULT_CHARSET
+      Font.Color = clWhite
+      Font.Height = -21
+      Font.Name = 'Segoe UI Light'
+      Font.Style = []
+      ParentColor = False
+      ParentFont = False
+      Layout = tlCenter
+      ExplicitWidth = 263
+      ExplicitHeight = 30
+    end
   end
 end

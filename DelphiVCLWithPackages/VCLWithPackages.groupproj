@@ -1,0 +1,47 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <ProjectGuid>{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}</ProjectGuid>
+    </PropertyGroup>
+    <ItemGroup>
+        <Projects Include="ExeWatchSDKPkg.dpk">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="ModuleCustomers.dpk">
+            <Dependencies>ExeWatchSDKPkg.dpk</Dependencies>
+        </Projects>
+        <Projects Include="ModuleOrders.dpk">
+            <Dependencies>ExeWatchSDKPkg.dpk</Dependencies>
+        </Projects>
+        <Projects Include="HostApp.dpr">
+            <Dependencies>ExeWatchSDKPkg.dpk;ModuleCustomers.dpk;ModuleOrders.dpk</Dependencies>
+        </Projects>
+    </ItemGroup>
+    <ProjectExtensions>
+        <Borland.Personality>Default.Personality.12</Borland.Personality>
+        <Borland.ProjectType/>
+        <BorlandProject>
+            <Default.Personality/>
+        </BorlandProject>
+    </ProjectExtensions>
+    <Target Name="ExeWatchSDKPkg">
+        <MSBuild Projects="ExeWatchSDKPkg.dpk"/>
+    </Target>
+    <Target Name="ModuleCustomers">
+        <MSBuild Projects="ModuleCustomers.dpk"/>
+    </Target>
+    <Target Name="ModuleOrders">
+        <MSBuild Projects="ModuleOrders.dpk"/>
+    </Target>
+    <Target Name="HostApp">
+        <MSBuild Projects="HostApp.dpr"/>
+    </Target>
+    <Target Name="Build">
+        <CallTarget Targets="ExeWatchSDKPkg;ModuleCustomers;ModuleOrders;HostApp"/>
+    </Target>
+    <Target Name="Clean">
+        <CallTarget Targets="ExeWatchSDKPkg:Clean;ModuleCustomers:Clean;ModuleOrders:Clean;HostApp:Clean"/>
+    </Target>
+    <Target Name="Make">
+        <CallTarget Targets="ExeWatchSDKPkg:Make;ModuleCustomers:Make;ModuleOrders:Make;HostApp:Make"/>
+    </Target>
+</Project>
