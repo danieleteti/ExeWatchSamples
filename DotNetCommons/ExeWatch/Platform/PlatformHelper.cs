@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 
 namespace ExeWatch.Platform;
 
@@ -29,6 +30,15 @@ internal static class PlatformHelper
         if (!string.IsNullOrEmpty(hostname))
             return hostname;
         return $"{username}@unknown";
+    }
+
+    public static string AnonymizeUsername(string username)
+    {
+        if (string.IsNullOrEmpty(username))
+            return "anonymous";
+        var bytes = System.Text.Encoding.UTF8.GetBytes(username);
+        var hash = SHA1.HashData(bytes);
+        return Convert.ToHexString(hash).ToLowerInvariant()[..8];
     }
 
     public static string GetOsType()

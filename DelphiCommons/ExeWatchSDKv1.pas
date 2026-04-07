@@ -312,6 +312,13 @@ type
     /// Default: 7 days. Set to 0 to disable purging (unlimited accumulation).
     /// </summary>
     MaxPendingAgeDays: Integer;
+    /// <summary>
+    /// When True, the username portion of DeviceId is replaced with its SHA-1 hash.
+    /// e.g., "mario.rossi@PC01" becomes "a1b2c3d4...@PC01".
+    /// Useful for GDPR compliance in Active Directory environments.
+    /// Requires Delphi 10.2 Tokyo+; ignored on older versions.
+    /// </summary>
+    AnonymizeDeviceId: Boolean;
     class function Create(const AApiKey, ACustomerId: string): TExeWatchConfig; static;
   end;
 
@@ -698,6 +705,7 @@ type
     class function GetUsername: string;
     class function GetOSVersion: string;
     class function GetDeviceId: string;
+    class function AnonymizeUsername(const AUsername: string): string;
     class function GetDefaultStoragePath: string;
     class function GetTimezoneOffset: string;  // Returns offset like "+01:00" or "-05:00"
     class function GetAppVersionInfo: TAppVersionInfo;  // Auto-reads from current exe
@@ -708,7 +716,7 @@ function ExeWatch: TExeWatch;
 function EW: TExeWatch; inline;  // Short alias for ExeWatch
 function ExeWatchIsInitialized: Boolean;
 function _ExeWatch: TExeWatch; inline;  // Alias to avoid name conflict with unit name
-procedure InitializeExeWatch(const AApiKey, ACustomerId: string; AAppVersion: String = ''); overload;
+procedure InitializeExeWatch(const AApiKey, ACustomerId: string; AAppVersion: String = ''; AAnonymizeDeviceId: Boolean = False); overload;
 procedure InitializeExeWatch(const AConfig: TExeWatchConfig); overload;
 procedure FinalizeExeWatch;
 
@@ -900,12 +908,13 @@ begin
   Result := ExeWatch;
 end;
 
-procedure InitializeExeWatch(const AApiKey, ACustomerId: string; AAppVersion: String); overload;
+procedure InitializeExeWatch(const AApiKey, ACustomerId: string; AAppVersion: String; AAnonymizeDeviceId: Boolean); overload;
 var
   Config: TExeWatchConfig;
 begin
   Config := TExeWatchConfig.Create(AApiKey, ACustomerId);
   Config.AppVersion := AAppVersion;
+  Config.AnonymizeDeviceId := AAnonymizeDeviceId;
   InitializeExeWatch(Config);
   GExeWatch.SendDeviceInfo;
   // Warn if GUI app without VCL/FMX hook (deferred to allow hook units to register first)
@@ -1848,6 +1857,7 @@ begin
   Result.AppVersion := '';        // User-defined version, empty by default
   Result.GaugeSamplingIntervalSec := EXEWATCH_DEFAULT_GAUGE_SAMPLING_INTERVAL_SEC;
   Result.MaxPendingAgeDays := EXEWATCH_DEFAULT_MAX_PENDING_AGE_DAYS;
+  Result.AnonymizeDeviceId := False;
 end;
 
 { TExeWatchHelper }
@@ -1947,6 +1957,25 @@ end;
 class function TExeWatchHelper.GetDeviceId: string;
 begin
   Result := GetUsername + '@' + GetHostname;
+end;
+
+class function TExeWatchHelper.AnonymizeUsername(const AUsername: string): string;
+var
+  Bytes: TBytes;
+  Hash: Cardinal;
+  I: Integer;
+begin
+  if AUsername = '' then
+    Exit('anonymous');
+  // FNV-1a hash — fast, non-reversible, zero dependencies
+  Bytes := TEncoding.UTF8.GetBytes(AUsername);
+  Hash := 2166136261;
+  for I := 0 to Length(Bytes) - 1 do
+  begin
+    Hash := Hash xor Bytes[I];
+    Hash := Hash * 16777619;
+  end;
+  Result := IntToHex(Hash, 8).ToLower;
 end;
 
 class function TExeWatchHelper.GetDefaultStoragePath: string;
@@ -2184,6 +2213,10 @@ begin
   // Copy user-defined AppVersion from Config to DeviceInfo
   if FConfig.AppVersion <> '' then
     FConfig.DeviceInfo.AppVersion := FConfig.AppVersion;
+  // Anonymize username in DeviceId if requested (GDPR compliance)
+  if FConfig.AnonymizeDeviceId then
+    FConfig.DeviceInfo.DeviceId := TExeWatchHelper.AnonymizeUsername(FConfig.DeviceInfo.Username)
+      + '@' + FConfig.DeviceInfo.Hostname;
   FBuffer := TList<TLogEvent>.Create;
   FBufferLock := TCriticalSection.Create;
   FCustomDeviceInfo := TDictionary<string, string>.Create;

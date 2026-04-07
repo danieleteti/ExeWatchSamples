@@ -15,6 +15,13 @@ public sealed class ExeWatchConfig
     public int MaxPendingAgeDays { get; set; } = Constants.DefaultMaxPendingAgeDays;
     public List<KeyValuePair<string, string>> InitialCustomDeviceInfo { get; set; } = [];
 
+    /// <summary>
+    /// When true, the username portion of DeviceId is replaced with its SHA-1 hash.
+    /// e.g., "mario.rossi@PC01" becomes "a1b2c3d4...@PC01".
+    /// Useful for GDPR compliance in Active Directory environments.
+    /// </summary>
+    public bool AnonymizeDeviceId { get; set; }
+
     public ExeWatchConfig()
     {
     }

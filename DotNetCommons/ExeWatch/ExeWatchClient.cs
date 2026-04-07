@@ -88,11 +88,16 @@ public sealed class ExeWatchClient : IDisposable
             _config.StoragePath = PlatformHelper.GetDefaultStoragePath();
 
         // Device info
+        var hostname = PlatformHelper.GetHostname();
+        var username = PlatformHelper.GetUsername();
+        var deviceId = config.AnonymizeDeviceId
+            ? $"{PlatformHelper.AnonymizeUsername(username)}@{hostname}"
+            : PlatformHelper.GetDeviceId();
         _deviceInfo = new DeviceInfo
         {
-            DeviceId = PlatformHelper.GetDeviceId(),
-            Hostname = PlatformHelper.GetHostname(),
-            Username = PlatformHelper.GetUsername(),
+            DeviceId = deviceId,
+            Hostname = hostname,
+            Username = username,
             OsType = PlatformHelper.GetOsType(),
             OsVersion = PlatformHelper.GetOsVersion(),
             AppBinaryVersion = SystemInfoCollector.GetAppBinaryVersion(),
