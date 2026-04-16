@@ -77,6 +77,14 @@ The API is intentionally similar across all SDKs:
 | Metrics | `EW.IncrementCounter` / `EW.RecordGauge` | `EW.IncrementCounter` / `EW.RecordGauge` | `ew.incrementCounter` / `ew.recordGauge` |
 | Exceptions | Automatic | Automatic | Automatic |
 
+### Specific Scenarios (HowTo)
+
+| Scenario | Question |
+|----------|----------|
+| [InitialCustomDeviceInfo](SpecificScenarios/InitialCustomDeviceInfo/) | How do I attach tags and environment info (RDP, Terminal Server, desktop mode) to the first log event and device info at startup? |
+
+See the [SpecificScenarios README](SpecificScenarios/README.md) for the full list.
+
 ## Learn More
 
 - **Documentation**: https://exewatch.com/ui/docs

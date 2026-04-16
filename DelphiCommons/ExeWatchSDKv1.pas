@@ -41,7 +41,7 @@ uses
   System.Diagnostics;  // For TStopwatch (high-precision timing)
 
 const
-  EXEWATCH_SDK_VERSION = '0.20.0';
+  EXEWATCH_SDK_VERSION = '0.21.0';
   EXEWATCH_API_VERSION = 'v1';  // API version this SDK targets
   {$IF NOT DEFINED(LOCAL_EXEWATCH)}
   EXEWATCH_ENDPOINT = 'https://exewatch.com';
@@ -288,6 +288,13 @@ type
     /// Set before creating TExeWatch to include in the initial device info call.
     /// </summary>
     InitialCustomDeviceInfo: TArray<TPair<string, string>>;
+    /// <summary>
+    /// Global tags to apply before the first log event ("Application started").
+    /// Use this to include environment context (e.g. session type, deployment mode)
+    /// in the very first log. Tags set here behave exactly like SetTag — they are
+    /// included in all subsequent events until removed.
+    /// </summary>
+    GlobalTags: TArray<TPair<string, string>>;
     /// <summary>
     /// Sample rate for events (1.0 = 100%, 0.5 = 50%, 0.1 = 10%).
     /// Errors and Fatal always bypass sampling.
@@ -931,6 +938,8 @@ begin
   finally
     GExeWatchLock.Leave;
   end;
+  // Warn if GUI app without VCL/FMX hook (deferred to allow hook units to register first)
+  CheckAndWarnAboutFrameworkHook;
 end;
 
 procedure FinalizeExeWatch;
@@ -1968,13 +1977,16 @@ begin
   if AUsername = '' then
     Exit('anonymous');
   // FNV-1a hash — fast, non-reversible, zero dependencies
+  // Overflow is intentional (modular arithmetic), so disable overflow checking
   Bytes := TEncoding.UTF8.GetBytes(AUsername);
+  {$IFOPT Q+}{$DEFINE EW_RESTORE_Q}{$Q-}{$ENDIF}
   Hash := 2166136261;
   for I := 0 to Length(Bytes) - 1 do
   begin
     Hash := Hash xor Bytes[I];
     Hash := Hash * 16777619;
   end;
+  {$IFDEF EW_RESTORE_Q}{$Q+}{$UNDEF EW_RESTORE_Q}{$ENDIF}
   Result := IntToHex(Hash, 8).ToLower;
 end;
 
@@ -2192,6 +2204,7 @@ var
   OriginalName: string;
   StartupData: TJSONObject;
   StartupMsg: string;
+  Pair: TPair<string, string>;
 begin
   inherited Create;
   FConfig := AConfig;
@@ -2213,10 +2226,15 @@ begin
   // Copy user-defined AppVersion from Config to DeviceInfo
   if FConfig.AppVersion <> '' then
     FConfig.DeviceInfo.AppVersion := FConfig.AppVersion;
-  // Anonymize username in DeviceId if requested (GDPR compliance)
+  // Anonymize username (and DeviceId) if requested (GDPR compliance).
+  // We overwrite Username here, not just DeviceId, so the real Windows login
+  // is never shipped to the backend — avoids leaking via device tooltips,
+  // the Devices page, or any other field that displays the username.
   if FConfig.AnonymizeDeviceId then
-    FConfig.DeviceInfo.DeviceId := TExeWatchHelper.AnonymizeUsername(FConfig.DeviceInfo.Username)
-      + '@' + FConfig.DeviceInfo.Hostname;
+  begin
+    FConfig.DeviceInfo.Username := TExeWatchHelper.AnonymizeUsername(FConfig.DeviceInfo.Username);
+    FConfig.DeviceInfo.DeviceId := FConfig.DeviceInfo.Username + '@' + FConfig.DeviceInfo.Hostname;
+  end;
   FBuffer := TList<TLogEvent>.Create;
   FBufferLock := TCriticalSection.Create;
   FCustomDeviceInfo := TDictionary<string, string>.Create;
@@ -2235,6 +2253,10 @@ begin
   // Global tags
   FGlobalTags := TDictionary<string, string>.Create;
   FGlobalTagsLock := TCriticalSection.Create;
+
+  // Apply initial tags before the startup log is emitted
+  for Pair in AConfig.GlobalTags do
+    FGlobalTags.AddOrSetValue(Pair.Key, Pair.Value);
 
   FShutdown := False;
   FShutdownEvent := TEvent.Create(nil, True, False, '');
