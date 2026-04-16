@@ -50,8 +50,7 @@ uses
 
 const
   // Replace with your actual API key from the ExeWatch dashboard
-//  EXEWATCH_API_KEY = 'ew_win_FDYE6Jfu9rojpDMekuAGwRFCoh3e-qDsUAVtrnh7DQo'; //remoto
-  EXEWATCH_API_KEY = 'ew_win_STfZFFFiFuDS_U_VFZgx_jMEV-huDt2-gwPnOY7BmYM';
+  EXEWATCH_API_KEY = 'ew_win_xxxxxx_USE_YOUR_OWN_KEY';
 {$R *.dfm}
 
 { ---------------------------------------------------------------------------

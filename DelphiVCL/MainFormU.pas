@@ -85,7 +85,7 @@ uses
 
 const
   // Replace with your actual API key from the ExeWatch dashboard
-  EXEWATCH_API_KEY = 'ew_win_U9DDSZs1GPRgq_Mkyz_5R4EIzlpQ-RdDdr0ooeHXbrY';
+  EXEWATCH_API_KEY = 'ew_win_xxxxxx_USE_YOUR_OWN_KEY';
 
 {$R *.dfm}
 
