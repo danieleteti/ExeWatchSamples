@@ -13,6 +13,7 @@ This folder contains focused examples that solve **specific integration question
 | Folder                                              | Question                                                     |
 | --------------------------------------------------- | ------------------------------------------------------------ |
 | [InitialCustomDeviceInfo](InitialCustomDeviceInfo/) | How do I attach tags and environment info (RDP, Terminal Server, desktop mode) to the **first log event** and device info at startup? |
+| [madExceptIntegration](madExceptIntegration/)       | I already use **madExcept**. How do I forward intercepted exceptions to ExeWatch with madExcept's resolved stack (unit names + line numbers) instead of the SDK's raw capture? |
 
 ---
 
