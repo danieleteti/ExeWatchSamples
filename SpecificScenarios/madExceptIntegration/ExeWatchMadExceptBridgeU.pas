@@ -11,22 +11,26 @@
   The callback leaves madExcept's Handled flag alone: the regular madExcept
   dialog, bug report, and email flow continue to work unchanged.
 
+  How it works:
+
+    Build an extra_data JSON with stack_trace set to madExcept's BugReport,
+    then call EW.Log(llError, Msg, Tag, ExtraData). The supplied stack is
+    sent to the dashboard as-is.
+
   Requires:
     - madExcept installed and linked (Project > madExcept settings >
       "madExcept enabled") so the debug info used to resolve frames is
       embedded in the executable.
-    - ExeWatch SDK v0.22.0 or newer (for EW.ErrorWithException with a
-      pre-built stack trace).
+    - ExeWatch SDK v0.21.0 or newer.
     - InitializeExeWatch must be called before exceptions start firing
-      (typically right after Application.Initialize). ExeWatchIsInitialized
-      below guards against the early-startup case.
+      (typically right after Application.Initialize). The ExeWatchIsInitialized
+      guard below handles the early-startup race.
 
   Failure modes handled:
     - ExeWatch not yet initialized (crash before InitializeExeWatch):
-      we skip silently; madExcept still saves the bug report locally.
-    - ExceptObject is not an Exception (hardware fault before Delphi wraps
-      it): we use EW.ErrorWithStackTrace with the class + message strings
-      madExcept extracted.
+      skip silently; madExcept still saves the bug report locally.
+    - ExceptObject is not an Exception (hardware fault before the Delphi
+      wrapper): fall back to madExcept's ExceptClass/ExceptMessage strings.
     - Callback may run on any thread — the EW.* API is thread-safe, so we
       pass stDontSync to avoid unnecessary main-thread marshalling.
 ******************************************************************************* }
@@ -39,6 +43,7 @@ implementation
 
 uses
   System.SysUtils,
+  System.JSON,
   madExcept,
   ExeWatchSDKv1;
 
@@ -47,16 +52,16 @@ const
 
 { Build the stack-trace string to send to ExeWatch.
 
-  We use IMEException.BugReport, which returns the full formatted bug report
-  (exception header, call stack of the crashed thread, module list, etc.).
-  madExcept's help warns that this property can be slow because it may
-  trigger full symbolication — but we are already inside an error path,
-  and symbolicated frames are precisely why this bridge exists.
+  IMEException.BugReport returns the full formatted bug report (exception
+  header, call stack of the crashed thread, module list, etc.). madExcept's
+  help warns the property can be slow because it may trigger full
+  symbolication — but we are already inside an error path, and symbolicated
+  frames are precisely why this bridge exists.
 
-  If you prefer a slimmer payload (call stack only, no module list / thread
-  list / registers), use GetBugReport(false) or drill into BugReportSections
-  to extract the 'call stack' field. Every extra KB still goes into the
-  log event as a single string, subject to the server's max_message_length. }
+  If you prefer a slimmer payload (call stack only, no module/thread list
+  or registers), use GetBugReport(false) or drill into BugReportSections
+  to extract the 'call stack' field. Every extra KB goes into the log
+  event as a single string, subject to the server's max_message_length. }
 
 function BuildMadExceptStackTrace(const ExceptIntf: IMEException): string;
 begin
@@ -68,7 +73,8 @@ end;
 procedure ExeWatchMadExceptHandler(const ExceptIntf: IMEException;
   var Handled: Boolean);
 var
-  StackTrace, ExClass, ExMsg: string;
+  ExtraData: TJSONObject;
+  ExClass, ExMsg: string;
   E: TObject;
 begin
   if ExceptIntf = nil then
@@ -76,10 +82,8 @@ begin
   if not ExeWatchIsInitialized then
     Exit;  // SDK not ready yet — let madExcept handle this one alone
 
-  StackTrace := BuildMadExceptStackTrace(ExceptIntf);
-
-  // Prefer class/message taken from the original Exception object if present
-  // (matches what a try/except would see); fall back to the madExcept fields
+  // Prefer class/message from the original Exception object when available
+  // (matches what a try/except would see); fall back to madExcept's fields
   // for hardware faults that arrived before the Delphi wrapper.
   E := ExceptIntf.ExceptObject;
   if Assigned(E) and (E is Exception) then
@@ -93,8 +97,13 @@ begin
     ExMsg   := ExceptIntf.ExceptMessage;
   end;
 
-  // SDK stores AStackTrace verbatim and skips its own StackWalk-based capture.
-  EW.ErrorWithStackTrace(ExMsg, EW_TAG, StackTrace, ExClass);
+  // Pre-populate extra_data so the SDK's Log() skips its own stack capture.
+  ExtraData := TJSONObject.Create;
+  ExtraData.AddPair('exception_class',   ExClass);
+  ExtraData.AddPair('exception_message', ExMsg);
+  ExtraData.AddPair('stack_trace',       BuildMadExceptStackTrace(ExceptIntf));
+
+  EW.Log(llError, ExMsg, EW_TAG, ExtraData);
 
   // Handled deliberately left untouched: madExcept's own dialog,
   // bug report, and email flow must still run.

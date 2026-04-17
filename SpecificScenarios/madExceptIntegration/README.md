@@ -7,7 +7,7 @@ This sample answers exactly that.
 ## What this sample demonstrates
 
 - A **single bridge unit** (`ExeWatchMadExceptBridgeU.pas`) that registers a madExcept callback and forwards every intercepted exception to ExeWatch.
-- Use of the new SDK method `EW.ErrorWithStackTrace(Message, Tag, StackTrace, ExceptionClass)` — the SDK stores the caller-provided stack verbatim and **skips its own capture**, so what you see in the ExeWatch dashboard is madExcept's symbolicated stack.
+- How to supply madExcept's symbolicated stack to `EW.Log` so it appears verbatim in the dashboard (instead of the SDK's own less accurate capture).
 - Three buttons to trigger: a regular `Exception.Create`, a nil-pointer access violation (hardware exception — bypasses `try/except`), and a plain `EW.Info` log for baseline comparison.
 
 ## Why forward madExcept's stack
@@ -22,13 +22,12 @@ madExcept already resolved that same stack with the JDBG/MAP info embedded at li
 procedure ExeWatchMadExceptHandler(const ExceptIntf: IMEException;
   var Handled: Boolean);
 var
-  StackTrace, ExClass, ExMsg: string;
+  ExtraData: TJSONObject;
+  ExClass, ExMsg: string;
   E: TObject;
 begin
   if (ExceptIntf = nil) or (not ExeWatchIsInitialized) then
     Exit;
-
-  StackTrace := ExceptIntf.BugReport;
 
   E := ExceptIntf.ExceptObject;
   if Assigned(E) and (E is Exception) then
@@ -42,7 +41,13 @@ begin
     ExMsg   := ExceptIntf.ExceptMessage;
   end;
 
-  EW.ErrorWithStackTrace(ExMsg, 'exception', StackTrace, ExClass);
+  // Pre-populate extra_data; the SDK honors stack_trace if it's already set.
+  ExtraData := TJSONObject.Create;
+  ExtraData.AddPair('exception_class',   ExClass);
+  ExtraData.AddPair('exception_message', ExMsg);
+  ExtraData.AddPair('stack_trace',       ExceptIntf.BugReport);
+
+  EW.Log(llError, ExMsg, 'exception', ExtraData);
   // Handled is left untouched — madExcept's dialog / bug report still runs.
 end;
 
@@ -54,10 +59,10 @@ initialization
 
 ## Prerequisites
 
-- Delphi 12.3+ (RAD Studio)
-- **madExcept installed in the IDE** (install from <https://madshi.net/madExceptDownload.htm>)
-- An ExeWatch API key (<https://exewatch.com>)
-- SDK version **0.22.0+** (adds `ErrorWithStackTrace`, which lets the caller supply a pre-built stack). Older SDKs only expose `ErrorWithException(E)`, which forces SDK-side capture.
+- Delphi **XE8 or newer** (the bridge unit itself; the bundled `.dproj` targets Delphi 12, but copying `ExeWatchMadExceptBridgeU.pas` into any XE8+ project works).
+- **madExcept installed in the IDE** (install from <https://madshi.net/madExceptDownload.htm>).
+- An ExeWatch API key (<https://exewatch.com>).
+- ExeWatch SDK **v0.21.0 or newer**.
 
 ## How to run
 
@@ -92,7 +97,7 @@ Add this as the first guard in the handler. This drops everything that a `try/ex
 
 ### Coexist with EurekaLog instead of madExcept
 
-EurekaLog exposes an equivalent callback: `RegisterEventExceptionNotify`. The principle is identical — extract EurekaLog's resolved stack, then call `EW.ErrorWithStackTrace(E.Message, 'exception', Stack, E.ClassName)`.
+EurekaLog exposes an equivalent callback: `RegisterEventExceptionNotify`. The principle is identical — extract EurekaLog's resolved stack, build the same `extra_data` with `stack_trace` pre-set, and call `EW.Log(llError, ...)`.
 
 ## File layout
 

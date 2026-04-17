@@ -24,8 +24,9 @@
     1. RegisterExceptionHandler(...) installs our callback inside madExcept.
     2. The callback reads IMEException.BugReport — madExcept's fully
        symbolicated report — and extracts class/message from ExceptObject.
-    3. It calls EW.ErrorWithStackTrace(Msg, Tag, StackTrace, ClassName).
-       The SDK stores the supplied stack verbatim; no auto-capture runs.
+    3. It calls EW.Log(llError, ...) with a pre-built extra_data JSON whose
+       stack_trace field is set to the madExcept stack, so that stack reaches
+       the ExeWatch dashboard as-is.
     4. We leave Handled alone so madExcept's normal flow still runs.
 
   Prerequisite: madExcept must be installed in the IDE. This sample also
