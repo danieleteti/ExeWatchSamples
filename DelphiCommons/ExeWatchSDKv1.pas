@@ -461,25 +461,19 @@ type
     procedure Fatal(const AFormat: string; const AArgs: array of const; const ATag: string = 'main'); overload;
 
     procedure ErrorWithException(E: Exception; const ATag: string = 'main';
-      const AAdditionalMessage: string = ''); overload;
+      const AAdditionalMessage: string = '');
 
     /// <summary>
     /// Logs an error with a pre-built stack trace supplied by the caller.
     /// Use this when an external tool (madExcept, EurekaLog, a custom handler)
     /// has already resolved a more accurate stack than the SDK could produce
-    /// on its own. The SDK's internal capture is skipped — the provided
-    /// AStackTrace string is sent verbatim.
+    /// on its own. The SDK's internal StackWalk-based capture is skipped —
+    /// the provided AStackTrace string is sent verbatim.
+    ///
+    /// When forwarding a Delphi Exception, pass E.Message and E.ClassName.
     /// </summary>
     procedure ErrorWithStackTrace(const AMessage, ATag, AStackTrace: string;
       const AExceptionClass: string = '');
-
-    /// <summary>
-    /// Logs an exception with a pre-built stack trace (e.g. from madExcept's
-    /// IMEException.CallStack). Extracts ExceptionClass/Message from E but
-    /// uses AStackTrace instead of the SDK's own StackWalk-based capture.
-    /// </summary>
-    procedure ErrorWithException(E: Exception; const AStackTrace: string;
-      const ATag: string = 'main'; const AAdditionalMessage: string = ''); overload;
 
     /// <summary>
     /// Queues device hardware info and custom info to be sent to the server.
@@ -3858,26 +3852,6 @@ begin
   ExtraData.AddPair('stack_trace', AStackTrace);
 
   Log(llError, AMessage, ATag, ExtraData);
-end;
-
-procedure TExeWatch.ErrorWithException(E: Exception; const AStackTrace: string;
-  const ATag, AAdditionalMessage: string);
-var
-  ExtraData: TJSONObject;
-  Msg: string;
-begin
-  ExtraData := TJSONObject.Create;
-  ExtraData.AddPair('exception_class', E.ClassName);
-  ExtraData.AddPair('exception_message', E.Message);
-  // Use the caller-provided stack trace verbatim — skip SDK's own capture.
-  ExtraData.AddPair('stack_trace', AStackTrace);
-
-  if AAdditionalMessage <> '' then
-    Msg := AAdditionalMessage + ': ' + E.Message
-  else
-    Msg := E.Message;
-
-  Log(llError, Msg, ATag, ExtraData);
 end;
 
 procedure TExeWatch.Flush;

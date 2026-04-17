@@ -68,8 +68,8 @@ end;
 procedure ExeWatchMadExceptHandler(const ExceptIntf: IMEException;
   var Handled: Boolean);
 var
-  StackTrace: string;
-  E: Exception;
+  StackTrace, ExClass, ExMsg: string;
+  E: TObject;
 begin
   if ExceptIntf = nil then
     Exit;
@@ -78,23 +78,23 @@ begin
 
   StackTrace := BuildMadExceptStackTrace(ExceptIntf);
 
-  if Assigned(ExceptIntf.ExceptObject) and
-     (ExceptIntf.ExceptObject is Exception) then
+  // Prefer class/message taken from the original Exception object if present
+  // (matches what a try/except would see); fall back to the madExcept fields
+  // for hardware faults that arrived before the Delphi wrapper.
+  E := ExceptIntf.ExceptObject;
+  if Assigned(E) and (E is Exception) then
   begin
-    E := Exception(ExceptIntf.ExceptObject);
-    // Overload that takes a pre-built stack: SDK stores it verbatim and
-    // skips its own StackWalk-based capture.
-    EW.ErrorWithException(E, StackTrace, EW_TAG, ExceptIntf.ExceptMessage);
+    ExClass := E.ClassName;
+    ExMsg   := Exception(E).Message;
   end
   else
   begin
-    // Non-Exception crash (hardware fault arriving before the Delphi wrapper)
-    EW.ErrorWithStackTrace(
-      ExceptIntf.ExceptMessage,
-      EW_TAG,
-      StackTrace,
-      ExceptIntf.ExceptClass);
+    ExClass := ExceptIntf.ExceptClass;
+    ExMsg   := ExceptIntf.ExceptMessage;
   end;
+
+  // SDK stores AStackTrace verbatim and skips its own StackWalk-based capture.
+  EW.ErrorWithStackTrace(ExMsg, EW_TAG, StackTrace, ExClass);
 
   // Handled deliberately left untouched: madExcept's own dialog,
   // bug report, and email flow must still run.

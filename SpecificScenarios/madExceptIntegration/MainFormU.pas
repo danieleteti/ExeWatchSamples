@@ -22,9 +22,10 @@
   How it works:
 
     1. RegisterExceptionHandler(...) installs our callback inside madExcept.
-    2. The callback builds a stack-trace string from IMEException.CallStack.
-    3. It calls EW.ErrorWithException(E, StackTrace, ...) — the SDK stores
-       the supplied stack verbatim and skips its own auto-capture.
+    2. The callback reads IMEException.BugReport — madExcept's fully
+       symbolicated report — and extracts class/message from ExceptObject.
+    3. It calls EW.ErrorWithStackTrace(Msg, Tag, StackTrace, ClassName).
+       The SDK stores the supplied stack verbatim; no auto-capture runs.
     4. We leave Handled alone so madExcept's normal flow still runs.
 
   Prerequisite: madExcept must be installed in the IDE. This sample also
