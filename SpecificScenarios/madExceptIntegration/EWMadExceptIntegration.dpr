@@ -1,6 +1,10 @@
 program EWMadExceptIntegration;
 
 uses
+  madLinkDisAsm,
+  madListHardware,
+  madListProcesses,
+  madListModules,
   madExcept,                      // Link madExcept into the executable
   Vcl.Forms,
   ExeWatchSDKv1,
