@@ -1,0 +1,13 @@
+object MainForm: TMainForm
+  Left = 0
+  Top = 0
+  Caption = 'ExeWatch Android Sample'
+  ClientHeight = 563
+  ClientWidth = 357
+  FormFactor.Width = 320
+  FormFactor.Height = 480
+  FormFactor.Devices = [Desktop]
+  OnCreate = FormCreate
+  OnDestroy = FormDestroy
+  DesignerMasterStyle = 3
+end
