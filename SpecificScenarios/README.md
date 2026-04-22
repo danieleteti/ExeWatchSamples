@@ -13,6 +13,7 @@ This folder contains focused examples that solve **specific integration question
 | Folder                                              | Question                                                     |
 | --------------------------------------------------- | ------------------------------------------------------------ |
 | [BreadcrumbsUsage](BreadcrumbsUsage/)               | How exactly do **breadcrumbs** work? Do I add them in batches? Does `EW.Error` fire automatically, or do I call it myself? Four buttons demonstrate caught exceptions, unhandled exceptions, and why Info logs don't carry breadcrumbs. |
+| [DllFromOtherLanguages](DllFromOtherLanguages/)     | Can the ExeWatch **DLL SDK** really be called from languages that aren't Delphi or C++Builder? Runnable smoke tests from **Microsoft Visual C++** and **Python ctypes** that validate all five Windows ABI axes (calling convention, name decoration, string marshalling, struct packing, callback ABI). |
 | [InitialCustomDeviceInfo](InitialCustomDeviceInfo/) | How do I attach tags and environment info (RDP, Terminal Server, desktop mode) to the **first log event** and device info at startup? |
 | [madExceptIntegration](madExceptIntegration/)       | I already use **madExcept**. How do I forward intercepted exceptions to ExeWatch with madExcept's resolved stack (unit names + line numbers) instead of the SDK's raw capture? |
 
