@@ -1,15 +1,15 @@
 //---------------------------------------------------------------------------
 // ExeWatch DLL SDK Sample - C++Builder VCL Application
 //
-// This demo shows how to use the ExeWatch SDK via DLL from C++Builder.
-// Each button maps to one SDK capability.
-//
-// The DLL is loaded at runtime via LoadLibrary + GetProcAddress so there
-// is NO import library required: no .lib or .a file needs to be present
-// at link time, and the app survives gracefully if the DLL is missing.
-// This is the recommended pattern across every C/C++ compiler (bcc64x,
-// MSVC, MinGW, Clang) because each compiler expects a differently
-// formatted import library, while LoadLibrary works identically for all.
+// The ExeWatch DLL is loaded dynamically at startup via LoadLibrary +
+// GetProcAddress (see ExeWatchSDKv1.dynload.c, added as a project unit).
+// This means:
+//   * no import library (.lib/.a) to match against a specific toolchain
+//     -- identical source compiles under bcc32, bcc64x, MSVC, MinGW, Clang
+//   * the app stays running and shows a clear message if the DLL is
+//     missing, instead of failing to start
+//   * the loader is reusable: drop ExeWatchSDKv1.h + ExeWatchSDKv1.dynload.c
+//     into any Windows C/C++ project to get the same behaviour.
 //
 // Quick start:
 //   1. Replace EXEWATCH_API_KEY below with your own key
@@ -25,111 +25,15 @@
 #pragma hdrstop
 
 #include "MainFormU.h"
+
+// Tell ExeWatchSDKv1.h to declare every ew_* as a function-pointer
+// variable and expose the ew_LoadSDK() / ew_UnloadSDK() loader API.
+// ExeWatchSDKv1.dynload.c provides the corresponding definitions.
+#define EW_DYNAMIC_LOAD
+#include "ExeWatchSDKv1.h"
+
 #include <Winapi.PsAPI.hpp>
 #include <math.h>
-
-//---------------------------------------------------------------------------
-// ExeWatch DLL — dynamic loading layer.
-//
-// We do NOT include ExeWatchSDKv1.h here because its function
-// declarations would collide with our function-pointer globals of the
-// same name. The small set of constants we need is inlined below.
-// If you want the full header for reference, open
-// ExeWatchSDKv1.h in the same folder.
-//---------------------------------------------------------------------------
-
-// Mirrored from ExeWatchSDKv1.h — the only constants we use in this sample:
-#define EW_OK             0
-#define EW_BT_CLICK       0
-#define EW_BT_NAVIGATION  1
-#define EW_BT_USER        8
-
-// stdcall function-pointer types (match the DLL's C ABI exactly):
-typedef int (__stdcall *TEW_Initialize)(const wchar_t*, const wchar_t*, const wchar_t*);
-typedef int (__stdcall *TEW_Shutdown)(void);
-typedef int (__stdcall *TEW_GetVersion)(wchar_t*, int);
-typedef int (__stdcall *TEW_GetLastError)(wchar_t*, int);
-typedef int (__stdcall *TEW_Log)(const wchar_t*, const wchar_t*);
-typedef int (__stdcall *TEW_Crumb)(int, const wchar_t*, const wchar_t*, const wchar_t*);
-typedef int (__stdcall *TEW_StartTiming)(const wchar_t*, const wchar_t*);
-typedef int (__stdcall *TEW_EndTiming)(const wchar_t*, double*);
-typedef int (__stdcall *TEW_SetUser)(const wchar_t*, const wchar_t*, const wchar_t*);
-typedef int (__stdcall *TEW_Void)(void);
-typedef int (__stdcall *TEW_Pair)(const wchar_t*, const wchar_t*);
-typedef int (__stdcall *TEW_Counter)(const wchar_t*, double, const wchar_t*);
-typedef int (__stdcall *TEW_ErrWithStack)(const wchar_t*, const wchar_t*, const wchar_t*, const wchar_t*);
-
-// Function pointer globals resolved once at startup by LoadExeWatchDll().
-// We reuse the real ew_* names so call sites below read naturally.
-static HMODULE           FEwDll                 = NULL;
-static TEW_Initialize    ew_Initialize          = NULL;
-static TEW_Shutdown      ew_Shutdown            = NULL;
-static TEW_GetVersion    ew_GetVersion          = NULL;
-static TEW_GetLastError  ew_GetLastError        = NULL;
-static TEW_Log           ew_Debug               = NULL;
-static TEW_Log           ew_Info                = NULL;
-static TEW_Log           ew_Warning             = NULL;
-static TEW_Log           ew_Error               = NULL;
-static TEW_Log           ew_Fatal               = NULL;
-static TEW_Crumb         ew_AddBreadcrumb       = NULL;
-static TEW_StartTiming   ew_StartTiming         = NULL;
-static TEW_EndTiming     ew_EndTiming           = NULL;
-static TEW_SetUser       ew_SetUser             = NULL;
-static TEW_Void          ew_ClearUser           = NULL;
-static TEW_Pair          ew_SetTag              = NULL;
-static TEW_Void          ew_ClearTags           = NULL;
-static TEW_Counter       ew_IncrementCounter    = NULL;
-static TEW_Counter       ew_RecordGauge         = NULL;
-static TEW_Pair          ew_SetCustomDeviceInfo = NULL;
-static TEW_Void          ew_SendCustomDeviceInfo = NULL;
-static TEW_ErrWithStack  ew_ErrorWithStackTrace = NULL;
-
-static bool LoadExeWatchDll()
-{
-#ifdef _WIN64
-	FEwDll = LoadLibraryW(L"ExeWatchSDKv1DLL_x64.dll");
-#else
-	FEwDll = LoadLibraryW(L"ExeWatchSDKv1DLL.dll");
-#endif
-	if (!FEwDll)
-		return false;
-
-	// Resolve each pointer. decltype lets us reuse the typedef without repeating it.
-	#define EW_BIND(fn) fn = (decltype(fn))GetProcAddress(FEwDll, #fn)
-	EW_BIND(ew_Initialize);
-	EW_BIND(ew_Shutdown);
-	EW_BIND(ew_GetVersion);
-	EW_BIND(ew_GetLastError);
-	EW_BIND(ew_Debug);
-	EW_BIND(ew_Info);
-	EW_BIND(ew_Warning);
-	EW_BIND(ew_Error);
-	EW_BIND(ew_Fatal);
-	EW_BIND(ew_AddBreadcrumb);
-	EW_BIND(ew_StartTiming);
-	EW_BIND(ew_EndTiming);
-	EW_BIND(ew_SetUser);
-	EW_BIND(ew_ClearUser);
-	EW_BIND(ew_SetTag);
-	EW_BIND(ew_ClearTags);
-	EW_BIND(ew_IncrementCounter);
-	EW_BIND(ew_RecordGauge);
-	EW_BIND(ew_SetCustomDeviceInfo);
-	EW_BIND(ew_SendCustomDeviceInfo);
-	EW_BIND(ew_ErrorWithStackTrace);
-	#undef EW_BIND
-
-	// If critical entry points are missing, treat it as a load failure.
-	return ew_Initialize && ew_Shutdown;
-}
-
-static void UnloadExeWatchDll()
-{
-	if (FEwDll) {
-		FreeLibrary(FEwDll);
-		FEwDll = NULL;
-	}
-}
 
 //---------------------------------------------------------------------------
 #pragma package(smart_init)
@@ -186,12 +90,13 @@ void __fastcall TMainForm::FormCreate(TObject *Sender)
 		return;
 	}
 
-	// Load the DLL dynamically. No import library is required — the
-	// DLL just needs to sit next to the executable at run time.
-	if (!LoadExeWatchDll())
+	// Load the DLL dynamically. No import library is required --
+	// the DLL just needs to sit next to the executable at run time.
+	int loadRc = ew_LoadSDK();
+	if (loadRc != EW_OK)
 	{
-		ShowMessage(
-			"Failed to load ExeWatch DLL.\r\n\r\n"
+		ShowMessage(String(
+			"Failed to load ExeWatch DLL (rc=") + loadRc + ")\r\n\r\n"
 #ifdef _WIN64
 			"Make sure ExeWatchSDKv1DLL_x64.dll is in the same folder\r\n"
 #else
@@ -237,8 +142,11 @@ void __fastcall TMainForm::FormCreate(TObject *Sender)
 void __fastcall TMainForm::FormDestroy(TObject *Sender)
 {
 	tmrPeriodicGauge->Enabled = false;
-	if (ew_Shutdown) ew_Shutdown();
-	UnloadExeWatchDll();
+	if (ew_IsSDKLoaded())
+	{
+		ew_Shutdown();
+		ew_UnloadSDK();
+	}
 }
 
 //---------------------------------------------------------------------------
