@@ -8,10 +8,14 @@ Short answer: **yes, from any language that can call a Windows DLL**. The DLL ex
 
 | Folder | Runtime | Setup cost | What it proves |
 |--------|---------|------------|----------------|
-| [`msvc/`](msvc/)     | Microsoft Visual C++ (`cl.exe`) | Visual Studio Build Tools 2022 | Plain Windows C ABI — if MSVC works, MinGW / Clang / Rust / Go / C# / VBA work too. |
-| [`python/`](python/) | CPython 3.7+ via `ctypes`       | `python` on PATH | Pure-stdlib runtime with no Embarcadero footprint at all. |
+| [`python/`](python/) | CPython 3.7+ via `ctypes` | `python` on PATH | Pure-stdlib runtime with no Embarcadero footprint at all. |
 
 Each sub-folder has its own README with build instructions, configuration, and expected output.
+
+> Looking for the **Microsoft Visual C++** smoke test? It lives at the repo
+> root under [`../../MSVCWithDLLSDK/`](../../MSVCWithDLLSDK/) — same idea,
+> moved out of `SpecificScenarios/` because it is a fully-fledged sample
+> on its own.
 
 ## The five ABI axes each sample validates
 

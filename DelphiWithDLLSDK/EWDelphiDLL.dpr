@@ -2,7 +2,7 @@ program EWDelphiDLL;
 
 uses
   Vcl.Forms,
-  ExeWatchSDKv1Imports in '..\DelphiDLLCommons\ExeWatchSDKv1Imports.pas',
+  ExeWatchSDKv1Imports in '..\DLLSDKCommons\ExeWatchSDKv1Imports.pas',
   MainFormU in 'MainFormU.pas' {MainForm};
 
 {$R *.res}

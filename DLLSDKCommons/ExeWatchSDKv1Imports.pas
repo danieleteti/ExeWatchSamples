@@ -81,7 +81,7 @@ const
   // IMPORTANT: This MUST match EW_DLL_ABI_VERSION in the DLL.
   // Increment BOTH whenever the DLL interface changes (new exports,
   // changed signatures, changed record layouts, etc.)
-  EW_IMPORT_ABI_VERSION = 2;
+  EW_IMPORT_ABI_VERSION = 3;
 
 type
   // --- Config record (must match DLL exactly) ---
@@ -216,6 +216,7 @@ function ew_SendCustomDeviceInfo: Integer; stdcall; external EXEWATCH_DLL;
 function ew_SetEnabled(Value: LongBool): Integer; stdcall; external EXEWATCH_DLL;
 function ew_GetEnabled: LongBool; stdcall; external EXEWATCH_DLL;
 function ew_GetPendingCount: Integer; stdcall; external EXEWATCH_DLL;
+function ew_WaitForSending(TimeoutSec: Integer): Integer; stdcall; external EXEWATCH_DLL;
 
 // Callbacks
 function ew_SetOnError(Callback: TEWErrorCallback): Integer; stdcall; external EXEWATCH_DLL;
@@ -272,6 +273,7 @@ type
   Tew_SetEnabled = function(Value: LongBool): Integer; stdcall;
   Tew_GetEnabled = function: LongBool; stdcall;
   Tew_GetPendingCount = function: Integer; stdcall;
+  Tew_WaitForSending = function(TimeoutSec: Integer): Integer; stdcall;
   // Callbacks
   Tew_SetOnError = function(Callback: TEWErrorCallback): Integer; stdcall;
   Tew_SetOnLogsSent = function(Callback: TEWLogsSentCallback): Integer; stdcall;
@@ -324,6 +326,7 @@ var
   ew_SetEnabled: Tew_SetEnabled;
   ew_GetEnabled: Tew_GetEnabled;
   ew_GetPendingCount: Tew_GetPendingCount;
+  ew_WaitForSending: Tew_WaitForSending;
   // Callbacks
   ew_SetOnError: Tew_SetOnError;
   ew_SetOnLogsSent: Tew_SetOnLogsSent;
@@ -594,6 +597,7 @@ begin
   @ew_SetEnabled := nil;
   @ew_GetEnabled := nil;
   @ew_GetPendingCount := nil;
+  @ew_WaitForSending := nil;
   @ew_SetOnError := nil;
   @ew_SetOnLogsSent := nil;
   @ew_SetOnDeviceInfoSent := nil;
@@ -659,6 +663,7 @@ begin
   @ew_SetEnabled := GetProcAddress(GDLLHandle, 'ew_SetEnabled');
   @ew_GetEnabled := GetProcAddress(GDLLHandle, 'ew_GetEnabled');
   @ew_GetPendingCount := GetProcAddress(GDLLHandle, 'ew_GetPendingCount');
+  @ew_WaitForSending := GetProcAddress(GDLLHandle, 'ew_WaitForSending');
   // Callbacks
   @ew_SetOnError := GetProcAddress(GDLLHandle, 'ew_SetOnError');
   @ew_SetOnLogsSent := GetProcAddress(GDLLHandle, 'ew_SetOnLogsSent');

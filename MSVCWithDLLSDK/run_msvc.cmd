@@ -1,13 +1,16 @@
 @echo off
 REM -----------------------------------------------------------------------------
-REM Helper: activate MSVC x64 environment, build test_msvc.cpp, run it.
+REM ExeWatch DLL SDK -- MSVC sample build + run script.
 REM
-REM Works if you installed Visual Studio 2022 Build Tools or the full IDE in a
-REM default location. If you installed VS in a non-default path, change
-REM VCVARS below.
+REM Auto-activates vcvars64 (64-bit MSVC), compiles main.cpp together with the
+REM shared dynamic-loader (..\DLLSDKCommons\ExeWatchSDKv1.dynload.c), and
+REM runs the resulting main.exe.
 REM -----------------------------------------------------------------------------
 
 setlocal
+
+REM Force English (1033) output from cl.exe regardless of the user's locale.
+set VSLANG=1033
 
 set VCVARS="C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 if not exist %VCVARS% set VCVARS="C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
@@ -22,13 +25,13 @@ if not exist %VCVARS% (
 call %VCVARS% >nul || goto :fail
 cd /d "%~dp0"
 
-echo Compiling test_msvc.cpp ...
-cl /EHsc /W4 /nologo test_msvc.cpp || goto :fail
+echo Compiling main.cpp + ExeWatchSDKv1.dynload.c ...
+cl /EHsc /W4 /nologo /I..\DLLSDKCommons main.cpp ..\DLLSDKCommons\ExeWatchSDKv1.dynload.c || goto :fail
 
 echo.
-echo Running test_msvc.exe ...
+echo Running main.exe ...
 echo.
-test_msvc.exe
+".\main.exe"
 exit /b %errorlevel%
 
 :fail

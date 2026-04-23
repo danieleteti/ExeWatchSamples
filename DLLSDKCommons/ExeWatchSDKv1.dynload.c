@@ -81,6 +81,7 @@ PFN_ew_SendCustomDeviceInfo ew_SendCustomDeviceInfo = NULL;
 PFN_ew_SetEnabled           ew_SetEnabled           = NULL;
 PFN_ew_GetEnabled           ew_GetEnabled           = NULL;
 PFN_ew_GetPendingCount      ew_GetPendingCount      = NULL;
+PFN_ew_WaitForSending       ew_WaitForSending       = NULL;
 
 PFN_ew_SetOnError           ew_SetOnError           = NULL;
 PFN_ew_SetOnLogsSent        ew_SetOnLogsSent        = NULL;
@@ -145,6 +146,7 @@ static int EwResolveAll(void) {
     EW_BIND(ew_SetEnabled);
     EW_BIND(ew_GetEnabled);
     EW_BIND(ew_GetPendingCount);
+    EW_BIND(ew_WaitForSending);
 
     EW_BIND(ew_SetOnError);
     EW_BIND(ew_SetOnLogsSent);
@@ -225,7 +227,7 @@ void ew_UnloadSDK(void) {
     ew_SendCustomDeviceInfo = NULL;
 
     ew_SetEnabled = NULL;           ew_GetEnabled = NULL;
-    ew_GetPendingCount = NULL;
+    ew_GetPendingCount = NULL;      ew_WaitForSending = NULL;
 
     ew_SetOnError = NULL;           ew_SetOnLogsSent = NULL;
     ew_SetOnDeviceInfoSent = NULL;

@@ -96,7 +96,7 @@ extern "C" {
 #define EW_BT_DEBUG       15
 
 /* --- ABI version (must match DLL) --- */
-#define EW_IMPORT_ABI_VERSION 2
+#define EW_IMPORT_ABI_VERSION 3
 
 /* --- DLL name --- */
 #ifdef _WIN64
@@ -187,6 +187,7 @@ typedef int  (__stdcall *PFN_ew_SendCustomDeviceInfo)(void);
 typedef int  (__stdcall *PFN_ew_SetEnabled)       (BOOL Value);
 typedef BOOL (__stdcall *PFN_ew_GetEnabled)       (void);
 typedef int  (__stdcall *PFN_ew_GetPendingCount)  (void);
+typedef int  (__stdcall *PFN_ew_WaitForSending)   (int TimeoutSec);
 
 typedef int  (__stdcall *PFN_ew_SetOnError)       (TEWErrorCallback Callback);
 typedef int  (__stdcall *PFN_ew_SetOnLogsSent)    (TEWLogsSentCallback Callback);
@@ -262,6 +263,7 @@ extern PFN_ew_SendCustomDeviceInfo ew_SendCustomDeviceInfo;
 extern PFN_ew_SetEnabled           ew_SetEnabled;
 extern PFN_ew_GetEnabled           ew_GetEnabled;
 extern PFN_ew_GetPendingCount      ew_GetPendingCount;
+extern PFN_ew_WaitForSending       ew_WaitForSending;
 
 extern PFN_ew_SetOnError           ew_SetOnError;
 extern PFN_ew_SetOnLogsSent        ew_SetOnLogsSent;
@@ -326,6 +328,7 @@ int __stdcall ew_SendCustomDeviceInfo(void);
 int  __stdcall ew_SetEnabled(BOOL Value);
 BOOL __stdcall ew_GetEnabled(void);
 int  __stdcall ew_GetPendingCount(void);
+int  __stdcall ew_WaitForSending(int TimeoutSec);
 
 /* Callbacks */
 int __stdcall ew_SetOnError(TEWErrorCallback Callback);
