@@ -326,6 +326,13 @@ type
     /// Requires Delphi 10.2 Tokyo+; ignored on older versions.
     /// </summary>
     AnonymizeDeviceId: Boolean;
+    /// <summary>
+    /// Override the ingest endpoint (base URL, no trailing slash).
+    /// Leave empty to use the compiled-in default (https://exewatch.com, or the
+    /// LOCAL_EXEWATCH override if defined). Intended for self-hosted deployments
+    /// and integration tests pointing at a local backend.
+    /// </summary>
+    Endpoint: string;
     class function Create(const AApiKey, ACustomerId: string): TExeWatchConfig; static;
   end;
 
@@ -424,6 +431,7 @@ type
     function GetEffectiveMaxMessageLength: Integer;
     function GetEffectiveMinLevel: TEWLogLevel;
     function GetEffectiveEnabled: Boolean;
+    function EffectiveEndpoint: string;
     function TruncateMessage(const AMessage: string): string;
     function SendToServer(const AFilePath: string): Boolean;
     function RemoveInvalidEventsFromFile(const AFilePath, AResponseJson: string): Boolean;
@@ -978,13 +986,34 @@ end;
 // ============================================================
 
 function ExeWatchIsGUIApplication: Boolean;
+{$IF DEFINED(MSWINDOWS) AND NOT DEFINED(CONSOLE)}
+var
+  WinSta: HWINSTA;
+  Flags: TUserObjectFlags;
+  LengthNeeded: DWORD;
+{$IFEND}
 begin
-  // {$APPTYPE CONSOLE} defines the CONSOLE symbol at compile time
-  // If CONSOLE is not defined, the app is a GUI application (VCL/FMX)
   {$IFDEF CONSOLE}
+  // {$APPTYPE CONSOLE} defines CONSOLE at compile time → never a GUI app
   Result := False;
   {$ELSE}
+  {$IFDEF MSWINDOWS}
+  // Non-console Windows app: could be a VCL/FMX GUI or a TService/daemon.
+  // Services run on non-interactive window stations (e.g. "Service-0x0-3e7$")
+  // which lack the WSF_VISIBLE flag — use this to tell them apart from GUI apps.
   Result := True;
+  WinSta := GetProcessWindowStation;
+  if WinSta <> 0 then
+  begin
+    FillChar(Flags, SizeOf(Flags), 0);
+    LengthNeeded := 0;
+    if GetUserObjectInformation(WinSta, UOI_FLAGS, @Flags, SizeOf(Flags), LengthNeeded) then
+      Result := (Flags.dwFlags and WSF_VISIBLE) <> 0;
+  end;
+  {$ELSE}
+  // Non-Windows, non-console → assume GUI (FMX on macOS/Linux/mobile)
+  Result := True;
+  {$ENDIF}
   {$ENDIF}
 end;
 
@@ -2330,7 +2359,7 @@ begin
     ' | SessionId=' + FSessionId +
     ' | ProcessId=' + IntToStr(FProcessId) +
     ' | CustomerId=' + IfThen(FConfig.CustomerId <> '', FConfig.CustomerId, '(empty)') +
-    ' | Endpoint=' + EXEWATCH_ENDPOINT);
+    ' | Endpoint=' + EffectiveEndpoint);
 
   // Clean up any .sending files from previous crashed sessions
   // (rename them back to .ewlog so they get retried)
@@ -2861,6 +2890,14 @@ begin
   end;
 end;
 
+function TExeWatch.EffectiveEndpoint: string;
+begin
+  if FConfig.Endpoint <> '' then
+    Result := FConfig.Endpoint
+  else
+    Result := EXEWATCH_ENDPOINT;
+end;
+
 function TExeWatch.TruncateMessage(const AMessage: string): string;
 var
   MaxLen: Integer;
@@ -3247,7 +3284,7 @@ begin
       RequestPayload := Payload.ToJSON;
       RequestSize := Length(RequestPayload);
 
-      Response := HttpClient.Post(EXEWATCH_ENDPOINT + Endpoint, RequestContent);
+      Response := HttpClient.Post(EffectiveEndpoint + Endpoint, RequestContent);
 
       // Log API trace (non-blocking)
       RequestStartTime.Stop;
@@ -3374,7 +3411,7 @@ begin
         NetworkError := True;
         FLastSendFailed := True;
         WriteInternalLog(Format('ERROR | Send failed: %s | File: %s | Endpoint: %s',
-          [E.Message, ExtractFileName(AFilePath), EXEWATCH_ENDPOINT + Endpoint]));
+          [E.Message, ExtractFileName(AFilePath), EffectiveEndpoint + Endpoint]));
         DoError('Send failed: ' + E.Message);
 
         // Log exception to API trace
