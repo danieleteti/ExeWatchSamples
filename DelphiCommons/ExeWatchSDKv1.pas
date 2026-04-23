@@ -366,9 +366,14 @@ type
     FBreadcrumbs: TDictionary<TThreadID, TList<TBreadcrumb>>;
     FBreadcrumbOwners: TDictionary<TThreadID, Int64>; // generation ID — detects ThreadID reuse on Linux
     FBreadcrumbsLock: TCriticalSection;
-    // Timing/Profiling
-    FPendingTimings: TDictionary<string, TTimingEntry>;
-    FTimingStack: TList<string>;
+    // Timing/Profiling — stored per-thread so two threads using the same
+    // timing id don't collide (StartTiming auto-closes duplicates).
+    // Outer key = TThread.Current.ThreadID; inner key = user-provided timing id.
+    // ThreadID reuse (common on Linux) is detected via FPendingTimingsOwners
+    // generation counters, mirroring the breadcrumbs pattern.
+    FPendingTimings: TDictionary<TThreadID, TDictionary<string, TTimingEntry>>;
+    FTimingStacks: TDictionary<TThreadID, TList<string>>;
+    FPendingTimingsOwners: TDictionary<TThreadID, Int64>;
     FPendingTimingsLock: TCriticalSection;
     // User identity
     FCurrentUser: TUserIdentity;
@@ -501,6 +506,15 @@ type
     procedure Shutdown;
 
     function GetPendingCount: Integer;
+    /// <summary>
+    /// Flushes the in-memory buffer to disk and waits (up to TimeoutSec
+    /// seconds) until every pending event has been shipped to the server.
+    /// Useful for short-lived apps / console samples where you must ensure
+    /// events are uploaded before the process exits.
+    /// Returns the number of events still pending when the call returns
+    /// (0 = fully drained, >0 = timeout with events still queued).
+    /// </summary>
+    function WaitForSending(ATimeoutSec: Integer): Integer;
 
     // ============================================================
     // Breadcrumbs - Trail of events before errors
@@ -863,9 +877,12 @@ var
   GExceptionHandlingInProgress: Integer = 0;  // 0=false, 1=true - Integer for TInterlocked
   // Breadcrumb thread ownership — atomic counter to detect ThreadID reuse on Linux
   GBreadcrumbNextGen: Int64 = 0;
+  // Timing thread ownership — same pattern as breadcrumbs, for per-thread timings
+  GTimingNextGen: Int64 = 0;
 
 threadvar
   GMyBreadcrumbGen: Int64; // unique generation for current thread (0 = not assigned yet)
+  GMyTimingGen: Int64;     // unique generation for current thread's timing dict
   GLastExceptionStackTrace: string; // stack trace captured at raise time (for VCL/FMX hook)
   GExceptionHookNesting: Integer; // prevent re-entry during stack capture
 
@@ -2244,8 +2261,9 @@ begin
   FBreadcrumbOwners := TDictionary<TThreadID, Int64>.Create;
   FBreadcrumbsLock := TCriticalSection.Create;
   // Timing/Profiling
-  FPendingTimings := TDictionary<string, TTimingEntry>.Create;
-  FTimingStack := TList<string>.Create;
+  FPendingTimings := TDictionary<TThreadID, TDictionary<string, TTimingEntry>>.Create;
+  FTimingStacks := TDictionary<TThreadID, TList<string>>.Create;
+  FPendingTimingsOwners := TDictionary<TThreadID, Int64>.Create;
   FPendingTimingsLock := TCriticalSection.Create;
   // User identity - initialized as empty
   FCurrentUser := Default(TUserIdentity);
@@ -2356,6 +2374,8 @@ destructor TExeWatch.Destroy;
 var
   I: Integer;
   TimingPair: TPair<string, TTimingEntry>;
+  ThreadTimingsPair: TPair<TThreadID, TDictionary<string, TTimingEntry>>;
+  ThreadStackPair: TPair<TThreadID, TList<string>>;
 begin
   Shutdown;
 
@@ -2393,18 +2413,26 @@ begin
   FBreadcrumbOwners.Free;
   FBreadcrumbsLock.Free;
 
-  // Free TJSONObject instances inside pending timings
+  // Free per-thread timing dicts (and TJSONObject metadata inside entries)
   FPendingTimingsLock.Enter;
   try
-    for TimingPair in FPendingTimings do
-      if TimingPair.Value.Metadata <> nil then
-        TimingPair.Value.Metadata.Free;
+    for ThreadTimingsPair in FPendingTimings do
+    begin
+      for TimingPair in ThreadTimingsPair.Value do
+        if TimingPair.Value.Metadata <> nil then
+          TimingPair.Value.Metadata.Free;
+      ThreadTimingsPair.Value.Free;
+    end;
     FPendingTimings.Clear;
+    for ThreadStackPair in FTimingStacks do
+      ThreadStackPair.Value.Free;
+    FTimingStacks.Clear;
   finally
     FPendingTimingsLock.Leave;
   end;
   FPendingTimings.Free;
-  FTimingStack.Free;
+  FTimingStacks.Free;
+  FPendingTimingsOwners.Free;
   FPendingTimingsLock.Free;
 
   // Free metrics resources
@@ -3843,6 +3871,25 @@ begin
   end;
 end;
 
+function TExeWatch.WaitForSending(ATimeoutSec: Integer): Integer;
+const
+  POLL_MS = 100;
+var
+  SW: TStopwatch;
+  TimeoutMs: Int64;
+begin
+  Flush;
+  if ATimeoutSec < 0 then ATimeoutSec := 0;
+  TimeoutMs := Int64(ATimeoutSec) * 1000;
+  SW := TStopwatch.StartNew;
+  while GetPendingCount > 0 do
+  begin
+    if SW.ElapsedMilliseconds >= TimeoutMs then Break;
+    Sleep(POLL_MS);
+  end;
+  Result := GetPendingCount;
+end;
+
 procedure TExeWatch.Shutdown;
 begin
   if FShutdown then
@@ -4094,6 +4141,9 @@ var
   I: Integer;
   AutoCloseDurationMs: Double;
   AutoCloseExtraData: TJSONObject;
+  ThreadId: TThreadID;
+  ThreadTimings: TDictionary<string, TTimingEntry>;
+  ThreadStack: TList<string>;
 begin
   if AId = '' then
     Exit;
@@ -4101,41 +4151,78 @@ begin
   Entry := TTimingEntry.Create(ATag, AMetadata);
 
   HasDuplicate := False;
+  ThreadId := TThread.Current.ThreadID;
 
   FPendingTimingsLock.Enter;
   try
-    // Check for duplicate - auto-close the previous timing before starting new one
-    if FPendingTimings.TryGetValue(AId, DuplicateEntry) then
+    // Assign unique generation to this thread on first timing access
+    if GMyTimingGen = 0 then
+      GMyTimingGen := TInterlocked.Increment(GTimingNextGen);
+
+    // Get or create per-thread dicts (+ detect ThreadID reuse on Linux)
+    if not FPendingTimings.TryGetValue(ThreadId, ThreadTimings) then
     begin
-      HasDuplicate := True;
-      FPendingTimings.Remove(AId);
-      FTimingStack.Remove(AId);
+      ThreadTimings := TDictionary<string, TTimingEntry>.Create;
+      FPendingTimings.Add(ThreadId, ThreadTimings);
+      ThreadStack := TList<string>.Create;
+      FTimingStacks.Add(ThreadId, ThreadStack);
+      FPendingTimingsOwners.AddOrSetValue(ThreadId, GMyTimingGen);
+    end
+    else
+    begin
+      // ThreadID was seen before — check whether it's still owned by this thread.
+      // If not (ThreadID reuse after a different thread exited without EndTiming),
+      // drop the stale entries silently: they belonged to a dead thread.
+      if FPendingTimingsOwners.ContainsKey(ThreadId) and
+         (FPendingTimingsOwners[ThreadId] <> GMyTimingGen) then
+      begin
+        for OldEntry in ThreadTimings.Values do
+          if OldEntry.Metadata <> nil then
+            OldEntry.Metadata.Free;
+        ThreadTimings.Clear;
+        if FTimingStacks.TryGetValue(ThreadId, ThreadStack) then
+          ThreadStack.Clear;
+        FPendingTimingsOwners[ThreadId] := GMyTimingGen;
+      end;
+      if not FTimingStacks.TryGetValue(ThreadId, ThreadStack) then
+      begin
+        ThreadStack := TList<string>.Create;
+        FTimingStacks.Add(ThreadId, ThreadStack);
+      end;
     end;
 
-    // Check max pending timings - collect oldest entries for auto-close (FIFO)
-    EvictedCount := 0;
-    while FPendingTimings.Count >= EXEWATCH_MAX_PENDING_TIMINGS do
+    // Check for duplicate - auto-close the previous timing before starting new one
+    if ThreadTimings.TryGetValue(AId, DuplicateEntry) then
     begin
-      if FTimingStack.Count > 0 then
+      HasDuplicate := True;
+      ThreadTimings.Remove(AId);
+      ThreadStack.Remove(AId);
+    end;
+
+    // Check max pending timings (per-thread) — collect oldest for auto-close (FIFO)
+    EvictedCount := 0;
+    while ThreadTimings.Count >= EXEWATCH_MAX_PENDING_TIMINGS do
+    begin
+      if ThreadStack.Count > 0 then
       begin
-        OldestId := FTimingStack[0];
-        if FPendingTimings.TryGetValue(OldestId, OldEntry) then
+        OldestId := ThreadStack[0];
+        if ThreadTimings.TryGetValue(OldestId, OldEntry) then
         begin
           SetLength(EvictedIds, EvictedCount + 1);
           SetLength(EvictedValues, EvictedCount + 1);
           EvictedIds[EvictedCount] := OldestId;
           EvictedValues[EvictedCount] := OldEntry;
           Inc(EvictedCount);
-          FPendingTimings.Remove(OldestId);
+          ThreadTimings.Remove(OldestId);
         end;
-        FTimingStack.Delete(0);
+        ThreadStack.Delete(0);
       end
       else
         Break;
     end;
 
-    FPendingTimings.Add(AId, Entry);
-    FTimingStack.Add(AId);
+    ThreadTimings.Add(AId, Entry);
+    ThreadStack.Add(AId);
   finally
     FPendingTimingsLock.Leave;
   end;
@@ -4200,6 +4287,9 @@ var
   I: Integer;
   LogMessage: string;
   StackIdx: Integer;
+  ThreadId: TThreadID;
+  ThreadTimings: TDictionary<string, TTimingEntry>;
+  ThreadStack: TList<string>;
 begin
   Result := -1;
 
@@ -4211,16 +4301,27 @@ begin
     Exit;
   end;
 
+  ThreadId := TThread.Current.ThreadID;
+  Found := False;
+
   FPendingTimingsLock.Enter;
   try
-    Found := FPendingTimings.TryGetValue(AId, Entry);
-    if Found then
+    if FPendingTimings.TryGetValue(ThreadId, ThreadTimings) and
+       FPendingTimingsOwners.ContainsKey(ThreadId) and
+       (GMyTimingGen <> 0) and
+       (FPendingTimingsOwners[ThreadId] = GMyTimingGen) then
     begin
-      FPendingTimings.Remove(AId);
-      // Remove from stack
-      StackIdx := FTimingStack.IndexOf(AId);
-      if StackIdx >= 0 then
-        FTimingStack.Delete(StackIdx);
+      Found := ThreadTimings.TryGetValue(AId, Entry);
+      if Found then
+      begin
+        ThreadTimings.Remove(AId);
+        if FTimingStacks.TryGetValue(ThreadId, ThreadStack) then
+        begin
+          StackIdx := ThreadStack.IndexOf(AId);
+          if StackIdx >= 0 then
+            ThreadStack.Delete(StackIdx);
+        end;
+      end;
     end;
   finally
     FPendingTimingsLock.Leave;
@@ -4291,14 +4392,21 @@ end;
 function TExeWatch.EndTiming: Double;
 var
   LastId: string;
+  ThreadId: TThreadID;
+  ThreadStack: TList<string>;
 begin
   Result := -1;
   LastId := '';
+  ThreadId := TThread.Current.ThreadID;
 
   FPendingTimingsLock.Enter;
   try
-    if FTimingStack.Count > 0 then
-      LastId := FTimingStack[FTimingStack.Count - 1];
+    if FTimingStacks.TryGetValue(ThreadId, ThreadStack) and
+       FPendingTimingsOwners.ContainsKey(ThreadId) and
+       (GMyTimingGen <> 0) and
+       (FPendingTimingsOwners[ThreadId] = GMyTimingGen) and
+       (ThreadStack.Count > 0) then
+      LastId := ThreadStack[ThreadStack.Count - 1];
   finally
     FPendingTimingsLock.Leave;
   end;
@@ -4313,10 +4421,19 @@ begin
 end;
 
 function TExeWatch.IsTimingActive(const AId: string): Boolean;
+var
+  ThreadId: TThreadID;
+  ThreadTimings: TDictionary<string, TTimingEntry>;
 begin
+  Result := False;
+  ThreadId := TThread.Current.ThreadID;
   FPendingTimingsLock.Enter;
   try
-    Result := FPendingTimings.ContainsKey(AId);
+    if FPendingTimings.TryGetValue(ThreadId, ThreadTimings) and
+       FPendingTimingsOwners.ContainsKey(ThreadId) and
+       (GMyTimingGen <> 0) and
+       (FPendingTimingsOwners[ThreadId] = GMyTimingGen) then
+      Result := ThreadTimings.ContainsKey(AId);
   finally
     FPendingTimingsLock.Leave;
   end;
@@ -4326,20 +4443,31 @@ procedure TExeWatch.CancelTiming(const AId: string);
 var
   Entry: TTimingEntry;
   StackIdx: Integer;
+  ThreadId: TThreadID;
+  ThreadTimings: TDictionary<string, TTimingEntry>;
+  ThreadStack: TList<string>;
 begin
   if AId = '' then
     Exit;
 
+  ThreadId := TThread.Current.ThreadID;
   FPendingTimingsLock.Enter;
   try
-    if FPendingTimings.TryGetValue(AId, Entry) then
+    if FPendingTimings.TryGetValue(ThreadId, ThreadTimings) and
+       FPendingTimingsOwners.ContainsKey(ThreadId) and
+       (GMyTimingGen <> 0) and
+       (FPendingTimingsOwners[ThreadId] = GMyTimingGen) and
+       ThreadTimings.TryGetValue(AId, Entry) then
     begin
       if Entry.Metadata <> nil then
         Entry.Metadata.Free;
-      FPendingTimings.Remove(AId);
-      StackIdx := FTimingStack.IndexOf(AId);
-      if StackIdx >= 0 then
-        FTimingStack.Delete(StackIdx);
+      ThreadTimings.Remove(AId);
+      if FTimingStacks.TryGetValue(ThreadId, ThreadStack) then
+      begin
+        StackIdx := ThreadStack.IndexOf(AId);
+        if StackIdx >= 0 then
+          ThreadStack.Delete(StackIdx);
+      end;
     end;
   finally
     FPendingTimingsLock.Leave;
@@ -4349,13 +4477,20 @@ end;
 procedure TExeWatch.CancelTiming;
 var
   LastId: string;
+  ThreadId: TThreadID;
+  ThreadStack: TList<string>;
 begin
   LastId := '';
+  ThreadId := TThread.Current.ThreadID;
 
   FPendingTimingsLock.Enter;
   try
-    if FTimingStack.Count > 0 then
-      LastId := FTimingStack[FTimingStack.Count - 1];
+    if FTimingStacks.TryGetValue(ThreadId, ThreadStack) and
+       FPendingTimingsOwners.ContainsKey(ThreadId) and
+       (GMyTimingGen <> 0) and
+       (FPendingTimingsOwners[ThreadId] = GMyTimingGen) and
+       (ThreadStack.Count > 0) then
+      LastId := ThreadStack[ThreadStack.Count - 1];
   finally
     FPendingTimingsLock.Leave;
   end;
@@ -4370,14 +4505,26 @@ var
   Entry: TTimingEntry;
   Info: TActiveTimingInfo;
   Id: string;
+  ThreadId: TThreadID;
+  ThreadTimings: TDictionary<string, TTimingEntry>;
+  ThreadStack: TList<string>;
 begin
+  SetLength(Result, 0);
+  ThreadId := TThread.Current.ThreadID;
   FPendingTimingsLock.Enter;
   try
-    SetLength(Result, FTimingStack.Count);
-    for I := 0 to FTimingStack.Count - 1 do
+    if not (FPendingTimings.TryGetValue(ThreadId, ThreadTimings) and
+            FTimingStacks.TryGetValue(ThreadId, ThreadStack) and
+            FPendingTimingsOwners.ContainsKey(ThreadId) and
+            (GMyTimingGen <> 0) and
+            (FPendingTimingsOwners[ThreadId] = GMyTimingGen)) then
+      Exit;
+
+    SetLength(Result, ThreadStack.Count);
+    for I := 0 to ThreadStack.Count - 1 do
     begin
-      Id := FTimingStack[I];
-      if FPendingTimings.TryGetValue(Id, Entry) then
+      Id := ThreadStack[I];
+      if ThreadTimings.TryGetValue(Id, Entry) then
       begin
         Info.Id := Id;
         Info.Tag := Entry.Tag;

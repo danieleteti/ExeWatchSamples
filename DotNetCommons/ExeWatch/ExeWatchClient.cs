@@ -50,9 +50,11 @@ public sealed class ExeWatchClient : IDisposable
     private readonly Dictionary<string, string> _customDeviceInfo = [];
     private readonly object _customDeviceInfoLock = new();
 
-    // Timing
-    private readonly Dictionary<string, TimingEntry> _timings = [];
-    private readonly List<string> _timingStack = [];
+    // Timing — stored per-thread so two threads using the same timing id
+    // don't collide (StartTiming auto-closes duplicates). Outer key =
+    // Environment.CurrentManagedThreadId; inner key = user-provided timing id.
+    private readonly Dictionary<int, Dictionary<string, TimingEntry>> _timings = [];
+    private readonly Dictionary<int, List<string>> _timingStacks = [];
     private readonly object _timingLock = new();
 
     // Metrics (written by RecordGauge/IncrementCounter, read/cleared by shipper thread)
@@ -781,43 +783,65 @@ public sealed class ExeWatchClient : IDisposable
     }
 
     // ======== TIMING ========
+    //
+    // Stored per-thread: two threads calling StartTiming("op") in parallel
+    // must not collide (StartTiming auto-closes duplicates on same thread).
+    // Caller must hold _timingLock.
+    private (Dictionary<string, TimingEntry> timings, List<string> stack)
+        GetOrCreateThreadTiming(int threadId)
+    {
+        if (!_timings.TryGetValue(threadId, out var timings))
+        {
+            timings = [];
+            _timings[threadId] = timings;
+        }
+        if (!_timingStacks.TryGetValue(threadId, out var stack))
+        {
+            stack = [];
+            _timingStacks[threadId] = stack;
+        }
+        return (timings, stack);
+    }
 
     public void StartTiming(string id, string tag = "", Dictionary<string, object>? metadata = null)
     {
         TimingEntry? duplicateEntry = null;
         var evictedIds = new List<string>();
         var evictedEntries = new List<TimingEntry>();
+        int threadId = Environment.CurrentManagedThreadId;
 
         lock (_timingLock)
         {
+            var (threadTimings, threadStack) = GetOrCreateThreadTiming(threadId);
+
             // Check for duplicate - extract for auto-close outside lock
-            if (_timings.TryGetValue(id, out var existing))
+            if (threadTimings.TryGetValue(id, out var existing))
             {
                 duplicateEntry = existing;
-                _timings.Remove(id);
-                _timingStack.Remove(id);
+                threadTimings.Remove(id);
+                threadStack.Remove(id);
             }
 
-            // Check max pending - collect evicted entries for auto-close
-            while (_timings.Count >= Constants.MaxPendingTimings && _timingStack.Count > 0)
+            // Check max pending (per-thread) - collect evicted entries for auto-close
+            while (threadTimings.Count >= Constants.MaxPendingTimings && threadStack.Count > 0)
             {
-                var oldest = _timingStack[0];
-                _timingStack.RemoveAt(0);
-                if (_timings.TryGetValue(oldest, out var evicted))
+                var oldest = threadStack[0];
+                threadStack.RemoveAt(0);
+                if (threadTimings.TryGetValue(oldest, out var evicted))
                 {
                     evictedIds.Add(oldest);
                     evictedEntries.Add(evicted);
-                    _timings.Remove(oldest);
+                    threadTimings.Remove(oldest);
                 }
             }
 
-            _timings[id] = new TimingEntry
+            threadTimings[id] = new TimingEntry
             {
                 StartTicks = Stopwatch.GetTimestamp(),
                 Tag = tag,
                 Metadata = metadata
             };
-            _timingStack.Add(id);
+            threadStack.Add(id);
         }
 
         // Auto-close entries OUTSIDE the lock (Log acquires other locks)
@@ -866,14 +890,17 @@ public sealed class ExeWatchClient : IDisposable
     {
         TimingEntry? entry;
         double durationMs;
+        int threadId = Environment.CurrentManagedThreadId;
 
         lock (_timingLock)
         {
-            if (!_timings.TryGetValue(id, out entry))
+            if (!_timings.TryGetValue(threadId, out var threadTimings) ||
+                !threadTimings.TryGetValue(id, out entry))
                 return -1;
 
-            _timings.Remove(id);
-            _timingStack.Remove(id);
+            threadTimings.Remove(id);
+            if (_timingStacks.TryGetValue(threadId, out var threadStack))
+                threadStack.Remove(id);
         }
 
         var elapsed = Stopwatch.GetElapsedTime(entry.StartTicks);
@@ -911,46 +938,60 @@ public sealed class ExeWatchClient : IDisposable
     public double EndTiming()
     {
         string? lastId;
+        int threadId = Environment.CurrentManagedThreadId;
         lock (_timingLock)
         {
-            if (_timingStack.Count == 0) return -1;
-            lastId = _timingStack[^1];
+            if (!_timingStacks.TryGetValue(threadId, out var threadStack) ||
+                threadStack.Count == 0)
+                return -1;
+            lastId = threadStack[^1];
         }
         return EndTiming(lastId);
     }
 
     public bool IsTimingActive(string id)
     {
+        int threadId = Environment.CurrentManagedThreadId;
         lock (_timingLock)
-            return _timings.ContainsKey(id);
+            return _timings.TryGetValue(threadId, out var t) && t.ContainsKey(id);
     }
 
     public void CancelTiming(string id)
     {
+        int threadId = Environment.CurrentManagedThreadId;
         lock (_timingLock)
         {
-            _timings.Remove(id);
-            _timingStack.Remove(id);
+            if (_timings.TryGetValue(threadId, out var threadTimings))
+                threadTimings.Remove(id);
+            if (_timingStacks.TryGetValue(threadId, out var threadStack))
+                threadStack.Remove(id);
         }
     }
 
     public void CancelTiming()
     {
+        int threadId = Environment.CurrentManagedThreadId;
         lock (_timingLock)
         {
-            if (_timingStack.Count == 0) return;
-            var lastId = _timingStack[^1];
-            _timings.Remove(lastId);
-            _timingStack.RemoveAt(_timingStack.Count - 1);
+            if (!_timingStacks.TryGetValue(threadId, out var threadStack) ||
+                threadStack.Count == 0)
+                return;
+            var lastId = threadStack[^1];
+            threadStack.RemoveAt(threadStack.Count - 1);
+            if (_timings.TryGetValue(threadId, out var threadTimings))
+                threadTimings.Remove(lastId);
         }
     }
 
     public List<ActiveTimingInfo> GetActiveTimings()
     {
+        int threadId = Environment.CurrentManagedThreadId;
         lock (_timingLock)
         {
             var result = new List<ActiveTimingInfo>();
-            foreach (var kvp in _timings)
+            if (!_timings.TryGetValue(threadId, out var threadTimings))
+                return result;
+            foreach (var kvp in threadTimings)
             {
                 var elapsed = Stopwatch.GetElapsedTime(kvp.Value.StartTicks);
                 result.Add(new ActiveTimingInfo
@@ -1030,8 +1071,36 @@ public sealed class ExeWatchClient : IDisposable
 
     public int GetPendingCount()
     {
+        int bufferCount;
         lock (_bufferLock)
-            return _buffer.Count;
+            bufferCount = _buffer.Count;
+        int fileCount = _fileQueue.GetAllPendingFiles().Count;
+        return bufferCount + fileCount;
+    }
+
+    /// <summary>
+    /// Flushes the in-memory buffer to disk and waits (up to
+    /// <paramref name="timeoutSec"/> seconds) until every pending event has
+    /// been shipped to the server. Useful for short-lived apps / console
+    /// samples where you must ensure events are uploaded before the process
+    /// exits.
+    /// Returns the number of events still pending when the call returns
+    /// (0 = fully drained, &gt;0 = timeout with events still queued).
+    /// </summary>
+    public int WaitForSending(int timeoutSec)
+    {
+        PersistBuffer();
+        PersistMetrics();
+
+        if (timeoutSec < 0) timeoutSec = 0;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        long timeoutMs = (long)timeoutSec * 1000;
+        while (GetPendingCount() > 0)
+        {
+            if (sw.ElapsedMilliseconds >= timeoutMs) break;
+            Thread.Sleep(100);
+        }
+        return GetPendingCount();
     }
 
     // ======== VERSION ========

@@ -19,8 +19,8 @@ interface
 
 uses
   Winapi.Windows, Winapi.Messages, System.SysUtils, System.Variants,
-  System.Classes, Vcl.Graphics, Vcl.Controls, Vcl.Forms, Vcl.Dialogs,
-  Vcl.StdCtrls, Winapi.PsAPI, Vcl.ExtCtrls;
+  System.Classes, System.SyncObjs, Vcl.Graphics, Vcl.Controls, Vcl.Forms,
+  Vcl.Dialogs, Vcl.StdCtrls, Winapi.PsAPI, Vcl.ExtCtrls;
 
 type
   TMainForm = class(TForm)
@@ -52,6 +52,8 @@ type
     Label1: TLabel;
     btnIncrementCounter2: TButton;
     btnCounter3: TButton;
+    grpThreadSafety: TGroupBox;
+    btnConcurrentTimings: TButton;
     procedure FormCreate(Sender: TObject);
     procedure btnDebugClick(Sender: TObject);
     procedure btnInfoClick(Sender: TObject);
@@ -70,6 +72,7 @@ type
     procedure btnSingleTimingClick(Sender: TObject);
     procedure btnIncrementCounter2Click(Sender: TObject);
     procedure btnCounter3Click(Sender: TObject);
+    procedure btnConcurrentTimingsClick(Sender: TObject);
   private
     procedure Log(const AMessage: string);
     procedure OnEWError(const ErrorMessage: string);
@@ -85,7 +88,7 @@ uses
 
 const
   // Replace with your actual API key from the ExeWatch dashboard
-  EXEWATCH_API_KEY = 'ew_win_xxxxxx_USE_YOUR_OWN_KEY';
+  EXEWATCH_API_KEY = 'ew_win_U9DDSZs1GPRgq_Mkyz_5R4EIzlpQ-RdDdr0ooeHXbrY';
 
 {$R *.dfm}
 
@@ -503,6 +506,112 @@ begin
   // across all recordings within the 60-second flush window.
   EW.RecordGauge('cart_items', Items, 'sample');
   Log('Gauge recorded - cart_items = ' + Items.ToString);
+end;
+
+{ ============================================================================
+  THREAD SAFETY — Concurrent timings with the same id.
+
+  Realistic scenario: a VCL app hosts a TCP server; every incoming request
+  is processed on its own TThread; each worker measures the same logical
+  operation via EW.StartTiming('process_request'). Before v0.21.x the
+  pending-timings dictionary was process-global, so two concurrent workers
+  collided on 'process_request' and one of them had its entry auto-closed
+  by the other.
+
+  From v0.21.x the dictionary is per-thread: each worker gets its own slot
+  and measures its own duration. The timing_id stays the same across
+  threads, so the dashboard keeps aggregating (Avg / Min / Max / P95) under
+  a single name.
+
+  The button below spawns 8 threads that all call StartTiming with the
+  SAME id, released simultaneously via a TEvent gate. Every thread should
+  report a positive duration.
+  ============================================================================ }
+
+type
+  TConcurrentTimingWorker = class(TThread)
+  private
+    FTimingId: string;
+    FWorkMs: Integer;
+    FGate: TEvent;
+    FDuration: Double;
+    FEndedOk: Boolean;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const ATimingId: string; AWorkMs: Integer; AGate: TEvent);
+    property Duration: Double read FDuration;
+    property EndedOk: Boolean read FEndedOk;
+  end;
+
+constructor TConcurrentTimingWorker.Create(const ATimingId: string;
+  AWorkMs: Integer; AGate: TEvent);
+begin
+  inherited Create(True);
+  FreeOnTerminate := False;
+  FTimingId := ATimingId;
+  FWorkMs := AWorkMs;
+  FGate := AGate;
+  FDuration := -1;
+  FEndedOk := False;
+end;
+
+procedure TConcurrentTimingWorker.Execute;
+begin
+  // All workers wait on the gate so they start timing as close together as
+  // possible — this is what makes the old process-global collision
+  // observable; without the gate the first thread could finish before the
+  // second even begins.
+  FGate.WaitFor(INFINITE);
+  EW.StartTiming(FTimingId, 'concurrent-demo');
+  Sleep(FWorkMs);
+  FDuration := EW.EndTiming(FTimingId);
+  FEndedOk := FDuration > 0;
+end;
+
+procedure TMainForm.btnConcurrentTimingsClick(Sender: TObject);
+const
+  THREAD_COUNT = 8;
+  TIMING_ID = 'process_request';
+var
+  Gate: TEvent;
+  Workers: array of TConcurrentTimingWorker;
+  I, OkCount: Integer;
+begin
+  Log('-- Concurrent Timings demo --');
+  Log(Format('Spawning %d threads that all call EW.StartTiming(%s)',
+    [THREAD_COUNT, QuotedStr(TIMING_ID)]));
+
+  Gate := TEvent.Create(nil, True, False, '');
+  try
+    SetLength(Workers, THREAD_COUNT);
+    for I := 0 to THREAD_COUNT - 1 do
+    begin
+      Workers[I] := TConcurrentTimingWorker.Create(TIMING_ID, 50 + I * 10, Gate);
+      Workers[I].Start;
+    end;
+
+    // Release all workers simultaneously to maximise the race window
+    Gate.SetEvent;
+
+    OkCount := 0;
+    for I := 0 to THREAD_COUNT - 1 do
+    begin
+      Workers[I].WaitFor;
+      if Workers[I].EndedOk then
+      begin
+        Inc(OkCount);
+        Log(Format('  thread #%d: %.1f ms', [I, Workers[I].Duration]));
+      end
+      else
+        Log(Format('  thread #%d: LOST (old process-global collision)', [I]));
+      Workers[I].Free;
+    end;
+    Log(Format('%d/%d threads measured their own timing.', [OkCount, THREAD_COUNT]));
+    Log(Format('Dashboard aggregates them all under a single ''%s'' operation.', [TIMING_ID]));
+  finally
+    Gate.Free;
+  end;
 end;
 
 { Clear Log }

@@ -43,6 +43,8 @@ __published:
 	TButton *btnClearLog;
 	TMemo *Memo1;
 	TTimer *tmrPeriodicGauge;
+	TGroupBox *grpThreadSafety;
+	TButton *btnConcurrentTimings;
 
 	void __fastcall FormCreate(TObject *Sender);
 	void __fastcall FormDestroy(TObject *Sender);
@@ -64,6 +66,7 @@ __published:
 	void __fastcall btnRecordGaugeClick(TObject *Sender);
 	void __fastcall btnClearLogClick(TObject *Sender);
 	void __fastcall tmrPeriodicGaugeTimer(TObject *Sender);
+	void __fastcall btnConcurrentTimingsClick(TObject *Sender);
 
 private:
 	void Log(const String &AMessage);

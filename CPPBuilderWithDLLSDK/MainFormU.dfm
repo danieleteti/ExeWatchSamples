@@ -3,7 +3,7 @@ object MainForm: TMainForm
   Top = 0
   BorderStyle = bsDialog
   Caption = 'ExeWatch :: C++Builder VCL DLL SDK Sample'
-  ClientHeight = 568
+  ClientHeight = 644
   ClientWidth = 704
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
@@ -16,11 +16,11 @@ object MainForm: TMainForm
   OnDestroy = FormDestroy
   DesignSize = (
     704
-    568)
+    644)
   TextHeight = 15
   object lblLog: TLabel
     Left = 8
-    Top = 379
+    Top = 455
     Width = 63
     Height = 15
     Caption = 'Activity Log'
@@ -217,9 +217,26 @@ object MainForm: TMainForm
       OnClick = btnCounter3Click
     end
   end
+  object grpThreadSafety: TGroupBox
+    Left = 8
+    Top = 370
+    Width = 688
+    Height = 70
+    Caption = ' Thread Safety '
+    TabOrder = 9
+    object btnConcurrentTimings: TButton
+      Left = 16
+      Top = 26
+      Width = 320
+      Height = 33
+      Caption = 'Concurrent Timings (8 threads, same id)'
+      TabOrder = 0
+      OnClick = btnConcurrentTimingsClick
+    end
+  end
   object btnClearLog: TButton
     Left = 632
-    Top = 369
+    Top = 445
     Width = 64
     Height = 25
     Caption = 'Clear'
@@ -228,7 +245,7 @@ object MainForm: TMainForm
   end
   object Memo1: TMemo
     Left = 8
-    Top = 400
+    Top = 476
     Width = 688
     Height = 160
     Anchors = [akLeft, akTop, akRight, akBottom]

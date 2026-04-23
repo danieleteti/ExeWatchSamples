@@ -31,8 +31,7 @@
 // ---------------------------------------------------------------------------
 // CONFIGURE ME -- replace with your own API key from https://exewatch.com
 // ---------------------------------------------------------------------------
-//#define EXEWATCH_API_KEY  L"ew_win_xxxxxx_USE_YOUR_OWN_KEY"
-#define EXEWATCH_API_KEY  L"ew_win_8gmQhOcYz0LrABACtwBmq6QyzcMJWXnyENOKH2rU6U4"
+#define EXEWATCH_API_KEY  L"ew_win_xxxxxx_USE_YOUR_OWN_KEY"
 #define CUSTOMER_ID       L"MsvcSampleApp"
 #define APP_VERSION       L"1.0.0"
 // ---------------------------------------------------------------------------

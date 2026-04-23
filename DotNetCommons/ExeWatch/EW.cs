@@ -79,6 +79,7 @@ public static class EW
     // Other
     public static void Flush() => ExeWatchSdk.Flush();
     public static int GetPendingCount() => ExeWatchSdk.GetPendingCount();
+    public static int WaitForSending(int timeoutSec) => ExeWatchSdk.WaitForSending(timeoutSec);
     public static string SessionId => ExeWatchSdk.SessionId;
     public static ExeWatchConfig Config => ExeWatchSdk.Config;
 }

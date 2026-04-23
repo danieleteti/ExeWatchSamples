@@ -1,4 +1,4 @@
-//---------------------------------------------------------------------------
+﻿//---------------------------------------------------------------------------
 // ExeWatch DLL SDK Sample - C++Builder VCL Application
 //
 // The ExeWatch DLL is loaded dynamically at startup via LoadLibrary +
@@ -34,6 +34,7 @@
 
 #include <Winapi.PsAPI.hpp>
 #include <math.h>
+#include <vector>
 
 //---------------------------------------------------------------------------
 #pragma package(smart_init)
@@ -90,19 +91,47 @@ void __fastcall TMainForm::FormCreate(TObject *Sender)
 		return;
 	}
 
-	// Load the DLL dynamically. No import library is required --
-	// the DLL just needs to sit next to the executable at run time.
-	int loadRc = ew_LoadSDK();
+	// Load the DLL dynamically. No import library is required -- the DLL
+	// just needs to be reachable at run time. ew_LoadSDK() uses the default
+	// Windows DLL search path (exe dir, System32, PATH); inside the samples
+	// repo the DLL lives in ..\DLLSDKCommons\, and C++Builder puts the
+	// compiled exe in Win32\Debug\ / Win64\Debug\ / bin\ — so we try a
+	// short list of candidates before giving up.
+	// Each candidate is relative to the exe dir. C++Builder typical outputs:
+	//   "sample/bin/"           (FinalOutputDir=.\bin)
+	//   "sample/Win32/Debug/"   (default layout, Win32)
+	//   "sample/Win64/Debug/"   (default layout, Win64)
+	//   "sample/Win64x/Debug/"  (clang toolchain, Win64x)
+#ifdef _WIN64
+	const wchar_t* const dllCandidates[] = {
+		L"ExeWatchSDKv1DLL_x64.dll",
+		L"..\\DLLSDKCommons\\ExeWatchSDKv1DLL_x64.dll",         // sample root
+		L"..\\..\\DLLSDKCommons\\ExeWatchSDKv1DLL_x64.dll",     // sample/bin/
+		L"..\\..\\..\\DLLSDKCommons\\ExeWatchSDKv1DLL_x64.dll", // sample/Win64/Debug/
+	};
+#else
+	const wchar_t* const dllCandidates[] = {
+		L"ExeWatchSDKv1DLL.dll",
+		L"..\\DLLSDKCommons\\ExeWatchSDKv1DLL.dll",             // sample root
+		L"..\\..\\DLLSDKCommons\\ExeWatchSDKv1DLL.dll",         // sample/bin/
+		L"..\\..\\..\\DLLSDKCommons\\ExeWatchSDKv1DLL.dll",     // sample/Win32/Debug/
+	};
+#endif
+	int loadRc = ew_LoadSDK(); // tries the default search path first
+	for (size_t i = 1; loadRc != EW_OK && i < sizeof(dllCandidates)/sizeof(dllCandidates[0]); i++)
+		loadRc = ew_LoadSDKFromPath(dllCandidates[i]);
 	if (loadRc != EW_OK)
 	{
 		ShowMessage(String(
 			"Failed to load ExeWatch DLL (rc=") + loadRc + ")\r\n\r\n"
 #ifdef _WIN64
-			"Make sure ExeWatchSDKv1DLL_x64.dll is in the same folder\r\n"
+			"Copy ExeWatchSDKv1DLL_x64.dll next to the executable,\r\n"
+			"or run from a folder where ..\\DLLSDKCommons\\ExeWatchSDKv1DLL_x64.dll exists."
 #else
-			"Make sure ExeWatchSDKv1DLL.dll is in the same folder\r\n"
+			"Copy ExeWatchSDKv1DLL.dll next to the executable,\r\n"
+			"or run from a folder where ..\\DLLSDKCommons\\ExeWatchSDKv1DLL.dll exists."
 #endif
-			"as the executable and try again.");
+			);
 		Application->Terminate();
 		return;
 	}
@@ -348,6 +377,117 @@ void __fastcall TMainForm::btnRecordGaugeClick(TObject *Sender)
 	int items = 1 + Random(10);
 	ew_RecordGauge(L"cart_items", (double)items, L"sample");
 	Log("Gauge recorded - cart_items = " + IntToStr(items));
+}
+
+//---------------------------------------------------------------------------
+// THREAD SAFETY - Concurrent timings with the same id.
+//
+// Realistic scenario: a VCL app hosts a TCP server; every incoming request
+// is processed on its own TThread; each worker measures the same logical
+// operation via ew_StartTiming(L"process_request"). Before v0.21.x the
+// pending-timings dictionary was process-global, so two concurrent workers
+// collided on "process_request" and one of them had its entry auto-closed
+// by the other.
+//
+// From v0.21.x the dictionary is per-thread: each worker gets its own slot
+// and measures its own duration. The timing_id stays the same across
+// threads, so the dashboard keeps aggregating (Avg/Min/Max/P95) under a
+// single name.
+//
+// The button below spawns 8 threads that all call ew_StartTiming with the
+// SAME id, released simultaneously via a gate event. Every thread should
+// report a positive duration.
+//---------------------------------------------------------------------------
+
+namespace {
+
+struct TimingWorkerResult {
+	double  Duration;
+	bool    EndedOk;
+};
+
+class TConcurrentTimingWorker : public TThread
+{
+public:
+	__fastcall TConcurrentTimingWorker(const UnicodeString &ATimingId,
+		int AWorkMs, HANDLE AGate, TimingWorkerResult *AResult)
+		: TThread(true),
+		  FTimingId(ATimingId), FWorkMs(AWorkMs), FGate(AGate),
+		  FResult(AResult)
+	{
+		FreeOnTerminate = false;
+	}
+
+protected:
+	virtual void __fastcall Execute()
+	{
+		// Block until all workers have reached this point, so start calls
+		// overlap as much as possible — that is what makes the old
+		// process-global collision observable.
+		WaitForSingleObject(FGate, INFINITE);
+		ew_StartTiming(FTimingId.c_str(), L"concurrent-demo");
+		Sleep(FWorkMs);
+		double elapsed = 0.0;
+		int rc = ew_EndTiming(FTimingId.c_str(), &elapsed);
+		FResult->Duration = elapsed;
+		FResult->EndedOk  = (rc == EW_OK) && (elapsed > 0);
+	}
+
+private:
+	UnicodeString         FTimingId;
+	int                   FWorkMs;
+	HANDLE                FGate;
+	TimingWorkerResult   *FResult;
+};
+
+} // anonymous namespace
+
+void __fastcall TMainForm::btnConcurrentTimingsClick(TObject *Sender)
+{
+	const int           THREAD_COUNT = 8;
+	const UnicodeString TIMING_ID    = L"process_request";
+
+	Log("-- Concurrent Timings demo --");
+	Log("Spawning 8 threads that all call ew_StartTiming(" +
+		QuotedStr(TIMING_ID) + ")");
+
+	HANDLE gate = CreateEvent(nullptr, TRUE /*manual-reset*/, FALSE, nullptr);
+	if (gate == nullptr) {
+		Log("CreateEvent failed");
+		return;
+	}
+
+	std::vector<TConcurrentTimingWorker*> workers(THREAD_COUNT);
+	std::vector<TimingWorkerResult>       results(THREAD_COUNT, {-1.0, false});
+
+	for (int i = 0; i < THREAD_COUNT; i++) {
+		workers[i] = new TConcurrentTimingWorker(
+			TIMING_ID, 50 + i * 10, gate, &results[i]);
+		workers[i]->Start();
+	}
+
+	// Release all workers simultaneously
+	SetEvent(gate);
+
+	int okCount = 0;
+	for (int i = 0; i < THREAD_COUNT; i++) {
+		workers[i]->WaitFor();
+		if (results[i].EndedOk) {
+			okCount++;
+			Log("  thread #" + IntToStr(i) + ": " +
+				FormatFloat("0.0", results[i].Duration) + " ms");
+		} else {
+			Log("  thread #" + IntToStr(i) +
+				": LOST (old process-global collision)");
+		}
+		delete workers[i];
+	}
+	CloseHandle(gate);
+
+	Log(IntToStr(okCount) + "/" + IntToStr(THREAD_COUNT) +
+		" threads measured their own timing.");
+	Log("Dashboard aggregates them all under a single '" + TIMING_ID +
+		"' operation.");
 }
 
 //---------------------------------------------------------------------------

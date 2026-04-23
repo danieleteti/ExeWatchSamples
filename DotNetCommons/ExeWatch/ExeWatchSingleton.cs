@@ -125,6 +125,7 @@ public static class ExeWatchSdk
     // Other
     public static void Flush() => Instance.Flush();
     public static int GetPendingCount() => Instance.GetPendingCount();
+    public static int WaitForSending(int timeoutSec) => Instance.WaitForSending(timeoutSec);
     public static string SessionId => Instance.SessionId;
     public static ExeWatchConfig Config => Instance.Config;
 }
