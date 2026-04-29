@@ -3,7 +3,7 @@ namespace ExeWatch;
 public static class Constants
 {
     // Version
-    public const string SdkVersion = "0.4.0";
+    public const string SdkVersion = "0.5.0";
     public const string SdkPlatform = "dotnet";
     public const string ApiVersion = "v1";
 

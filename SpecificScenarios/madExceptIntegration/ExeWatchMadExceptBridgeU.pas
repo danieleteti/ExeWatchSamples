@@ -21,7 +21,7 @@
     - madExcept installed and linked (Project > madExcept settings >
       "madExcept enabled") so the debug info used to resolve frames is
       embedded in the executable.
-    - ExeWatch SDK v0.21.0 or newer.
+    - ExeWatch SDK v0.22.0 or newer.
     - InitializeExeWatch must be called before exceptions start firing
       (typically right after Application.Initialize). The ExeWatchIsInitialized
       guard below handles the early-startup race.

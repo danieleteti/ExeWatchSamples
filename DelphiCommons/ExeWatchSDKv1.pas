@@ -41,7 +41,7 @@ uses
   System.Diagnostics;  // For TStopwatch (high-precision timing)
 
 const
-  EXEWATCH_SDK_VERSION = '0.21.0';
+  EXEWATCH_SDK_VERSION = '0.22.0';
   EXEWATCH_API_VERSION = 'v1';  // API version this SDK targets
   {$IF NOT DEFINED(LOCAL_EXEWATCH)}
   EXEWATCH_ENDPOINT = 'https://exewatch.com';
@@ -735,7 +735,7 @@ type
     class function GetOSVersion: string;
     class function GetDeviceId: string;
     class function AnonymizeUsername(const AUsername: string): string;
-    class function GetDefaultStoragePath: string;
+    class function GetDefaultStoragePath(const AApiKey: string = ''): string;
     class function GetTimezoneOffset: string;  // Returns offset like "+01:00" or "-05:00"
     class function GetAppVersionInfo: TAppVersionInfo;  // Auto-reads from current exe
     class function GetCurrentProcessId: Cardinal;
@@ -774,7 +774,6 @@ implementation
 uses
 {$IFDEF MSWINDOWS}
   Winapi.Windows,
-  Winapi.ShlObj,
   Winapi.WinSock,
   System.Win.Registry,
 {$ENDIF}
@@ -1905,7 +1904,7 @@ begin
   Result.BufferSize := EXEWATCH_DEFAULT_BUFFER_SIZE;
   Result.FlushIntervalMs := EXEWATCH_DEFAULT_FLUSH_INTERVAL_MS;
   Result.RetryIntervalMs := EXEWATCH_DEFAULT_RETRY_INTERVAL_MS;
-  Result.StoragePath := TExeWatchHelper.GetDefaultStoragePath;
+  Result.StoragePath := TExeWatchHelper.GetDefaultStoragePath(AApiKey);
   Result.DeviceInfo := TDeviceInfo.CreateFromSystem;
   Result.SampleRate := EXEWATCH_DEFAULT_SAMPLE_RATE;
   Result.AppBinaryVersion := '';  // Empty = auto-detect (already done in CreateFromSystem)
@@ -2036,30 +2035,44 @@ begin
   Result := IntToHex(Hash, 8).ToLower;
 end;
 
-class function TExeWatchHelper.GetDefaultStoragePath: string;
-{$IFDEF MSWINDOWS}
+class function TExeWatchHelper.GetDefaultStoragePath(const AApiKey: string = ''): string;
+// Each app gets its own subdirectory based on the API key prefix so that two
+// apps running concurrently on the same machine cannot pick up each other's
+// queued files from the shared %LOCALAPPDATA% tree.
+//
+// NOTE: if the API key is rotated while the app is running, files buffered
+// under the old key prefix are not migrated and will be cleaned up by the
+// max-age purge. Ensure the queue is flushed (WaitForSending) before
+// rotating a key in a long-running process.
 var
-  Path: array[0..MAX_PATH] of Char;
+  KeyPrefix: string;
+{$IFDEF MSWINDOWS}
+  BaseDir: string;
+{$ENDIF}
 begin
-  if SHGetFolderPath(0, CSIDL_LOCAL_APPDATA, 0, SHGFP_TYPE_CURRENT, Path) = S_OK then
-    Result := IncludeTrailingPathDelimiter(Path) + 'ExeWatch' + PathDelim + 'pending'
+  // 'default' is only reached if the caller explicitly passes an empty key,
+  // which the SDK rejects during initialization. It is kept as a safety net
+  // so this function never returns a path without a terminal subdirectory.
+  if AApiKey <> '' then
+    KeyPrefix := Copy(AApiKey, 1, 16)
   else
-    Result := IncludeTrailingPathDelimiter(TPath.GetTempPath) + 'ExeWatch' + PathDelim + 'pending';
-end;
+    KeyPrefix := 'default';
+
+{$IFDEF MSWINDOWS}
+  BaseDir := GetEnvironmentVariable('LOCALAPPDATA');
+  if BaseDir = '' then
+    BaseDir := TPath.GetTempPath;
+  Result := TPath.Combine(TPath.Combine(TPath.Combine(BaseDir, 'ExeWatch'), 'pending'), KeyPrefix);
 {$ELSE}
 {$IFDEF ANDROID}
-begin
-  // Use app's internal files directory (sandboxed, no permissions needed)
-  Result := IncludeTrailingPathDelimiter(
-    JStringToString(TAndroidHelper.Context.getFilesDir.getAbsolutePath))
-    + 'ExeWatch' + PathDelim + 'pending';
-end;
+  Result := TPath.Combine(TPath.Combine(TPath.Combine(
+    JStringToString(TAndroidHelper.Context.getFilesDir.getAbsolutePath),
+    'ExeWatch'), 'pending'), KeyPrefix);
 {$ELSE}
-begin
-  Result := IncludeTrailingPathDelimiter(TPath.GetTempPath) + 'ExeWatch' + PathDelim + 'pending';
+  Result := TPath.Combine(TPath.Combine(TPath.Combine(TPath.GetTempPath, 'ExeWatch'), 'pending'), KeyPrefix);
+{$ENDIF}
+{$ENDIF}
 end;
-{$ENDIF}
-{$ENDIF}
 
 class function TExeWatchHelper.GetTimezoneOffset: string;
 var

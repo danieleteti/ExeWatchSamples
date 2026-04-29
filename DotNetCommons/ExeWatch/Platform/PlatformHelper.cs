@@ -138,10 +138,22 @@ internal static class PlatformHelper
         return result;
     }
 
-    public static string GetDefaultStoragePath()
+    // Each app gets its own subdirectory based on the API key prefix so that
+    // two apps running concurrently on the same machine cannot pick up each
+    // other's queued files from the shared LocalAppData tree.
+    //
+    // NOTE: rotating the API key while the app is running orphans any files
+    // buffered under the old prefix. Call WaitForSending before rotating a
+    // key in a long-running process; orphaned files are purged by max-age.
+    //
+    // "default" is only reached if apiKey is empty, which ExeWatchClient
+    // rejects at initialization — it is a safety net so the path always has
+    // a terminal subdirectory.
+    public static string GetDefaultStoragePath(string apiKey = "")
     {
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        return Path.Combine(localAppData, "ExeWatch", "pending");
+        var prefix = string.IsNullOrEmpty(apiKey) ? "default" : apiKey[..Math.Min(16, apiKey.Length)];
+        return Path.Combine(localAppData, "ExeWatch", "pending", prefix);
     }
 
     public static string GenerateSessionId()

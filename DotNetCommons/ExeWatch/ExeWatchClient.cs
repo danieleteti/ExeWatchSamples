@@ -87,7 +87,7 @@ public sealed class ExeWatchClient : IDisposable
 
         // Storage path
         if (string.IsNullOrEmpty(_config.StoragePath))
-            _config.StoragePath = PlatformHelper.GetDefaultStoragePath();
+            _config.StoragePath = PlatformHelper.GetDefaultStoragePath(_config.ApiKey);
 
         // Device info
         var hostname = PlatformHelper.GetHostname();
