@@ -908,7 +908,7 @@ begin
   // Capture stack at raise time — called BEFORE SEH unwinding.
   // Only capture if not already set — the first raise (user's) is the one we want.
   // GetLastExceptionStackTrace clears it after consumption, allowing next capture.
-  if GLastExceptionStackTrace = '' then
+  if Assigned(Result) and (GLastExceptionStackTrace = '') then
     GLastExceptionStackTrace := GetStackTraceStr(0);
 end;
 {$ENDIF}
