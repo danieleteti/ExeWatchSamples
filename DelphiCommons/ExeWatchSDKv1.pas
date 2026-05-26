@@ -41,7 +41,7 @@ uses
   System.Diagnostics;  // For TStopwatch (high-precision timing)
 
 const
-  EXEWATCH_SDK_VERSION = '0.22.0';
+  EXEWATCH_SDK_VERSION = '0.22.1';
   EXEWATCH_API_VERSION = 'v1';  // API version this SDK targets
   {$IF NOT DEFINED(LOCAL_EXEWATCH)}
   EXEWATCH_ENDPOINT = 'https://exewatch.com';
@@ -2418,6 +2418,7 @@ var
   TimingPair: TPair<string, TTimingEntry>;
   ThreadTimingsPair: TPair<TThreadID, TDictionary<string, TTimingEntry>>;
   ThreadStackPair: TPair<TThreadID, TList<string>>;
+  Pair: TPair<TThreadID, TList<TBreadcrumb>>;
 begin
   Shutdown;
 
@@ -2440,7 +2441,7 @@ begin
   // Free TJSONObject instances inside breadcrumb records (all threads) and free lists
   FBreadcrumbsLock.Enter;
   try
-    for var Pair in FBreadcrumbs do
+    for Pair in FBreadcrumbs do
     begin
       for I := 0 to Pair.Value.Count - 1 do
         if Pair.Value[I].Data <> nil then
@@ -2778,6 +2779,23 @@ begin
   end;
 end;
 
+function GetFileSizeCompat(const AFileName: string): Int64;
+var
+  SearchRec: TSearchRec;
+begin
+  // TFile.GetSize requires Delphi 11+. FindFirst works from XE8 (and earlier),
+  // is cross-platform (Windows/Linux/Android), and reads the size from directory
+  // metadata without opening or locking the file. Fully qualified because
+  // Winapi.Windows (in scope) declares a clashing FindClose(THandle).
+  if System.SysUtils.FindFirst(AFileName, faAnyFile, SearchRec) = 0 then
+  begin
+    Result := SearchRec.Size;
+    System.SysUtils.FindClose(SearchRec);
+  end
+  else
+    Result := -1;
+end;
+
 procedure TExeWatch.CheckAPITraceRotation;
 var
   FileSize: Int64;
@@ -2787,7 +2805,7 @@ begin
     if not TFile.Exists(FAPITraceFile) then
       Exit;
 
-    FileSize := TFile.GetSize(FAPITraceFile);
+    FileSize := GetFileSizeCompat(FAPITraceFile);
     if FileSize > EXEWATCH_API_TRACE_MAX_SIZE then
       RotateAPITraceFile;
   except
