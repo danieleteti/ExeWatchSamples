@@ -41,6 +41,14 @@ internal static class PlatformHelper
         return Convert.ToHexString(hash).ToLowerInvariant()[..8];
     }
 
+    /// <summary>
+    /// Build an anonymized device id with BOTH halves hashed. Hashing only the
+    /// username would still leak the login when the hostname embeds it
+    /// (e.g. host "ALICE-PC" contains user "alice").
+    /// </summary>
+    public static string AnonymizeDeviceId(string username, string hostname)
+        => $"{AnonymizeUsername(username)}@{AnonymizeUsername(hostname)}";
+
     public static string GetOsType()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return "windows";

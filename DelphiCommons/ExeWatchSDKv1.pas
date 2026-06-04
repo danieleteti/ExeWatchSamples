@@ -3,6 +3,11 @@
 
   A lightweight SDK to send logs from Delphi applications to ExeWatch.
 
+  Requirements:
+  - Compiler: Delphi XE8 or later (32-bit and 64-bit)
+  - Windows: Vista / Server 2008 or later (uses GetTickCount64 etc.)
+  - Linux: glibc-based distributions
+
   Features:
   - Persistent log storage (logs are saved to disk before sending)
   - Automatic retry on failure
@@ -848,6 +853,17 @@ type
 function GetLogicalProcessorInformation(
   Buffer: PSystemLogicalProcessorInformation;
   var ReturnLength: DWORD): BOOL; stdcall; external kernel32;
+
+// SetThreadErrorMode is Vista+ and may not be declared in older Delphi Winapi.Windows.
+// Declared locally to keep the SDK independent of the RTL version.
+// Used to suppress the Windows "No Disk" critical-error popup when probing
+// empty removable drives (e.g. a physical floppy with no media inserted).
+const
+  EW_SEM_FAILCRITICALERRORS = $0001;
+  EW_SEM_NOOPENFILEERRORBOX = $8000;
+
+function SetThreadErrorMode(NewMode: DWORD; OldMode: PDWORD): BOOL; stdcall;
+  external kernel32 name 'SetThreadErrorMode';
 {$ENDIF}
 
 {$IFDEF LINUX}
@@ -1399,6 +1415,8 @@ var
   CPUBytesRead: DWORD;
   // For monitor enumeration
   DisplayDevice: TDisplayDevice;
+  // For floppy / empty-removable-drive "No Disk" popup suppression
+  OldErrorMode: DWORD;
 begin
   // Memory
   MemStatus.dwLength := SizeOf(MemStatus);
@@ -1461,60 +1479,81 @@ begin
     Result.CPUCores := Result.CPULogicalProcessors; // Fallback
 
   // Disks
+  //
+  // GetVolumeInformation / GetDiskFreeSpaceEx on an empty removable drive
+  // (e.g. a physical floppy with no media) trigger the Windows "No Disk"
+  // critical-error popup ("Exception Processing Message 0xc0000013").
+  // We suppress it for this thread for the duration of the enumeration,
+  // and skip A:/B: which are historically reserved for floppies and bring
+  // no useful information to an APM device profile.
   SetLength(Result.Disks, 0);
-  DriveBits := GetLogicalDrives;
-  for DriveChar := 'A' to 'Z' do
-  begin
-    if (DriveBits and 1) = 1 then
+  OldErrorMode := 0;
+  SetThreadErrorMode(EW_SEM_FAILCRITICALERRORS or EW_SEM_NOOPENFILEERRORBOX,
+    @OldErrorMode);
+  try
+    DriveBits := GetLogicalDrives;
+    for DriveChar := 'A' to 'Z' do
     begin
-      DriveRoot := DriveChar + ':\';
-      DriveTypeVal := GetDriveType(PChar(DriveRoot));
-
-      // Only include fixed and removable drives
-      if DriveTypeVal in [DRIVE_REMOVABLE, DRIVE_FIXED, DRIVE_REMOTE, DRIVE_RAMDISK] then
+      if (DriveBits and 1) = 1 then
       begin
-        DiskInfoRec.Drive := DriveChar + ':';
-
-        // Get volume info
-        FillChar(VolumeNameBuf, SizeOf(VolumeNameBuf), 0);
-        FillChar(FileSystemBuf, SizeOf(FileSystemBuf), 0);
-        VolSerial := 0;
-        MaxCompLen := 0;
-        FSFlags := 0;
-        if GetVolumeInformation(PChar(DriveRoot), VolumeNameBuf, MAX_PATH,
-          @VolSerial, MaxCompLen, FSFlags, FileSystemBuf, MAX_PATH) then
+        // Skip floppy-reserved letters unconditionally
+        if (DriveChar = 'A') or (DriveChar = 'B') then
         begin
-          DiskInfoRec.VolumeName := VolumeNameBuf;
-          DiskInfoRec.FileSystem := FileSystemBuf;
-        end
-        else
-        begin
-          DiskInfoRec.VolumeName := '';
-          DiskInfoRec.FileSystem := '';
+          DriveBits := DriveBits shr 1;
+          Continue;
         end;
 
-        // Get disk space
-        FreeBytesVal := 0;
-        TotalBytesVal := 0;
-        GetDiskFreeSpaceEx(PChar(DriveRoot), FreeBytesVal, TotalBytesVal, nil);
-        DiskInfoRec.TotalBytes := TotalBytesVal;
-        DiskInfoRec.FreeBytes := FreeBytesVal;
+        DriveRoot := DriveChar + ':\';
+        DriveTypeVal := GetDriveType(PChar(DriveRoot));
 
-        case DriveTypeVal of
-          DRIVE_REMOVABLE: DiskInfoRec.DriveType := 'Removable';
-          DRIVE_FIXED: DiskInfoRec.DriveType := 'Fixed';
-          DRIVE_REMOTE: DiskInfoRec.DriveType := 'Network';
-          DRIVE_CDROM: DiskInfoRec.DriveType := 'CDRom';
-          DRIVE_RAMDISK: DiskInfoRec.DriveType := 'RamDisk';
-        else
-          DiskInfoRec.DriveType := 'Unknown';
+        // Only include fixed and removable drives
+        if DriveTypeVal in [DRIVE_REMOVABLE, DRIVE_FIXED, DRIVE_REMOTE, DRIVE_RAMDISK] then
+        begin
+          DiskInfoRec.Drive := DriveChar + ':';
+
+          // Get volume info
+          FillChar(VolumeNameBuf, SizeOf(VolumeNameBuf), 0);
+          FillChar(FileSystemBuf, SizeOf(FileSystemBuf), 0);
+          VolSerial := 0;
+          MaxCompLen := 0;
+          FSFlags := 0;
+          if GetVolumeInformation(PChar(DriveRoot), VolumeNameBuf, MAX_PATH,
+            @VolSerial, MaxCompLen, FSFlags, FileSystemBuf, MAX_PATH) then
+          begin
+            DiskInfoRec.VolumeName := VolumeNameBuf;
+            DiskInfoRec.FileSystem := FileSystemBuf;
+          end
+          else
+          begin
+            DiskInfoRec.VolumeName := '';
+            DiskInfoRec.FileSystem := '';
+          end;
+
+          // Get disk space
+          FreeBytesVal := 0;
+          TotalBytesVal := 0;
+          GetDiskFreeSpaceEx(PChar(DriveRoot), FreeBytesVal, TotalBytesVal, nil);
+          DiskInfoRec.TotalBytes := TotalBytesVal;
+          DiskInfoRec.FreeBytes := FreeBytesVal;
+
+          case DriveTypeVal of
+            DRIVE_REMOVABLE: DiskInfoRec.DriveType := 'Removable';
+            DRIVE_FIXED: DiskInfoRec.DriveType := 'Fixed';
+            DRIVE_REMOTE: DiskInfoRec.DriveType := 'Network';
+            DRIVE_CDROM: DiskInfoRec.DriveType := 'CDRom';
+            DRIVE_RAMDISK: DiskInfoRec.DriveType := 'RamDisk';
+          else
+            DiskInfoRec.DriveType := 'Unknown';
+          end;
+
+          SetLength(Result.Disks, Length(Result.Disks) + 1);
+          Result.Disks[High(Result.Disks)] := DiskInfoRec;
         end;
-
-        SetLength(Result.Disks, Length(Result.Disks) + 1);
-        Result.Disks[High(Result.Disks)] := DiskInfoRec;
       end;
+      DriveBits := DriveBits shr 1;
     end;
-    DriveBits := DriveBits shr 1;
+  finally
+    SetThreadErrorMode(OldErrorMode, nil);
   end;
 
   // Monitors - enumerate physical display devices
@@ -2292,7 +2331,12 @@ begin
   if FConfig.AnonymizeDeviceId then
   begin
     FConfig.DeviceInfo.Username := TExeWatchHelper.AnonymizeUsername(FConfig.DeviceInfo.Username);
-    FConfig.DeviceInfo.DeviceId := FConfig.DeviceInfo.Username + '@' + FConfig.DeviceInfo.Hostname;
+    // The hostname can embed the username (e.g. host "DANIELETETIPC" contains
+    // login "daniele"), which would leak the real login through DeviceId even
+    // after the username is hashed. Hash the hostname portion too so DeviceId
+    // carries no PII while remaining stable per machine (hash@hash).
+    FConfig.DeviceInfo.DeviceId := FConfig.DeviceInfo.Username + '@' +
+      TExeWatchHelper.AnonymizeUsername(FConfig.DeviceInfo.Hostname);
   end;
   FBuffer := TList<TLogEvent>.Create;
   FBufferLock := TCriticalSection.Create;

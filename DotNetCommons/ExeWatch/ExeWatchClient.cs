@@ -93,7 +93,7 @@ public sealed class ExeWatchClient : IDisposable
         var hostname = PlatformHelper.GetHostname();
         var username = PlatformHelper.GetUsername();
         var deviceId = config.AnonymizeDeviceId
-            ? $"{PlatformHelper.AnonymizeUsername(username)}@{hostname}"
+            ? PlatformHelper.AnonymizeDeviceId(username, hostname)
             : PlatformHelper.GetDeviceId();
         _deviceInfo = new DeviceInfo
         {
