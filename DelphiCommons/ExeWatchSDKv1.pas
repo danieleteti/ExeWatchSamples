@@ -129,6 +129,11 @@ type
     StartTicks: Int64;  // TStopwatch.GetTimestamp for high-precision timing
     Tag: string;
     Metadata: TJSONObject;
+    // Nested timing traces: empty when the timing is flat (no enclosing trace).
+    // SpanId/TraceId/ParentSpanId are filled only for spans inside a StartTrace.
+    SpanId: string;
+    TraceId: string;
+    ParentSpanId: string;  // '' = trace root
     class function Create(const ATag: string; AMetadata: TJSONObject = nil): TTimingEntry; static;
   end;
 
@@ -572,6 +577,22 @@ type
     /// Starts a timing with format-style ID.
     /// </summary>
     procedure StartTiming(const AIdFormat: string; const AArgs: array of const; const ATag: string = ''); overload;
+
+    /// <summary>
+    /// Opens a named root trace (a tree of nested timings). Timings started while
+    /// the trace is open auto-nest under it via the per-thread LIFO stack. Returns
+    /// the generated trace_id. Single-thread/synchronous: a timing started on
+    /// another thread is not part of this trace. If a trace is already open on the
+    /// thread, this degrades to a normal child timing (no nested traces).
+    /// </summary>
+    function StartTrace(const AName: string): string;
+
+    /// <summary>
+    /// Closes the current thread's active root trace, emitting its span. Any child
+    /// timings still open are force-closed as failed (incomplete). Returns the
+    /// trace's total duration in ms, or -1 if no trace is active.
+    /// </summary>
+    function EndTrace: Double;
 
     /// <summary>
     /// Ends a timing measurement and sends a log. Returns duration in ms, or -1 if not found.
@@ -1145,6 +1166,16 @@ begin
   Result.StartTicks := TStopwatch.GetTimeStamp;  // High-precision timing
   Result.Tag := ATag;
   Result.Metadata := AMetadata;
+  Result.SpanId := '';
+  Result.TraceId := '';
+  Result.ParentSpanId := '';
+end;
+
+// Nested timing traces: 16-hex random id (trace_id / span_id). Mirrors the
+// session-id generation (a GUID with separators stripped, first 16 chars).
+function ExeWatchGenerateId16: string;
+begin
+  Result := Copy(TGUID.NewGuid.ToString.Replace('-', '').Replace('{', '').Replace('}', ''), 1, 16);
 end;
 
 { TMetricAccumulator }
@@ -4256,6 +4287,8 @@ var
   ThreadId: TThreadID;
   ThreadTimings: TDictionary<string, TTimingEntry>;
   ThreadStack: TList<string>;
+  ParentId: string;
+  ParentEntry: TTimingEntry;
 begin
   if AId = '' then
     Exit;
@@ -4331,6 +4364,20 @@ begin
       end
       else
         Break;
+    end;
+
+    // Nested timing traces: inherit the trace from the span currently on top of
+    // the stack. Only spans inside an active trace (parent TraceId <> '') get ids,
+    // so a plain nested StartTiming without StartTrace stays flat (TraceId '').
+    if ThreadStack.Count > 0 then
+    begin
+      ParentId := ThreadStack[ThreadStack.Count - 1];
+      if ThreadTimings.TryGetValue(ParentId, ParentEntry) and (ParentEntry.TraceId <> '') then
+      begin
+        Entry.TraceId := ParentEntry.TraceId;
+        Entry.ParentSpanId := ParentEntry.SpanId;
+        Entry.SpanId := ExeWatchGenerateId16;
+      end;
     end;
 
     ThreadTimings.Add(AId, Entry);
@@ -4458,6 +4505,15 @@ begin
   ExtraData.AddPair('duration_ms', TJSONNumber.Create(DurationMs));
   ExtraData.AddPair('success', TJSONBool.Create(ASuccess));
 
+  // Nested timing traces: emit the tree relationship when this span belongs to a
+  // trace. parent_span_id '' marks the root (the backend maps it to NULL).
+  if Entry.TraceId <> '' then
+  begin
+    ExtraData.AddPair('trace_id', Entry.TraceId);
+    ExtraData.AddPair('span_id', Entry.SpanId);
+    ExtraData.AddPair('parent_span_id', Entry.ParentSpanId);
+  end;
+
   // Merge metadata: start metadata + end metadata
   if (Entry.Metadata <> nil) or (AEndMetadata <> nil) then
   begin
@@ -4530,6 +4586,139 @@ begin
   end;
 
   Result := EndTiming(LastId, nil, True);
+end;
+
+function TExeWatch.StartTrace(const AName: string): string;
+var
+  ThreadId: TThreadID;
+  ThreadTimings: TDictionary<string, TTimingEntry>;
+  ThreadStack: TList<string>;
+  TopId: string;
+  TopEntry: TTimingEntry;
+  ActiveTraceId: string;
+  NewTraceId: string;
+  RootEntry: TTimingEntry;
+begin
+  Result := '';
+  if AName = '' then
+    Exit;
+
+  ThreadId := TThread.Current.ThreadID;
+  ActiveTraceId := '';
+
+  // Is a trace already open on this thread? (top-of-stack span carries its trace id)
+  FPendingTimingsLock.Enter;
+  try
+    if FPendingTimings.TryGetValue(ThreadId, ThreadTimings) and
+       FTimingStacks.TryGetValue(ThreadId, ThreadStack) and
+       (ThreadStack.Count > 0) then
+    begin
+      TopId := ThreadStack[ThreadStack.Count - 1];
+      if ThreadTimings.TryGetValue(TopId, TopEntry) then
+        ActiveTraceId := TopEntry.TraceId;
+    end;
+  finally
+    FPendingTimingsLock.Leave;
+  end;
+
+  if ActiveTraceId <> '' then
+  begin
+    // No nested traces — degrade to a child span under the active trace.
+    Log(llDebug, Format('StartTrace("%s") while a trace is active — nesting as a child span', [AName]), 'exewatch');
+    StartTiming(AName, '');
+    Result := ActiveTraceId;
+    Exit;
+  end;
+
+  // Open a new root: create the entry via the robust StartTiming path (handles
+  // per-thread dict/stack creation, ownership, eviction), then promote it to a
+  // root by stamping its trace/span ids. At stack-empty StartTiming leaves it flat.
+  StartTiming(AName, '');
+  NewTraceId := ExeWatchGenerateId16;
+
+  FPendingTimingsLock.Enter;
+  try
+    if FPendingTimings.TryGetValue(ThreadId, ThreadTimings) and
+       ThreadTimings.TryGetValue(AName, RootEntry) then
+    begin
+      RootEntry.TraceId := NewTraceId;
+      RootEntry.SpanId := ExeWatchGenerateId16;
+      RootEntry.ParentSpanId := '';  // root
+      ThreadTimings.AddOrSetValue(AName, RootEntry);  // store the modified record back
+      Result := NewTraceId;
+    end;
+  finally
+    FPendingTimingsLock.Leave;
+  end;
+end;
+
+function TExeWatch.EndTrace: Double;
+var
+  ThreadId: TThreadID;
+  ThreadTimings: TDictionary<string, TTimingEntry>;
+  ThreadStack: TList<string>;
+  TopId: string;
+  TopEntry: TTimingEntry;
+  ActiveTraceId: string;
+  RootId: string;
+  OpenChildIds: TArray<string>;
+  ChildCount: Integer;
+  I: Integer;
+begin
+  Result := -1;
+  ThreadId := TThread.Current.ThreadID;
+  ActiveTraceId := '';
+  RootId := '';
+  ChildCount := 0;
+
+  FPendingTimingsLock.Enter;
+  try
+    if FPendingTimings.TryGetValue(ThreadId, ThreadTimings) and
+       FTimingStacks.TryGetValue(ThreadId, ThreadStack) and
+       (ThreadStack.Count > 0) then
+    begin
+      TopId := ThreadStack[ThreadStack.Count - 1];
+      if ThreadTimings.TryGetValue(TopId, TopEntry) then
+        ActiveTraceId := TopEntry.TraceId;
+
+      if ActiveTraceId <> '' then
+      begin
+        // Walk the stack top-down: the root carries ParentSpanId ''; everything
+        // else of this trace still open is a forgotten child to force-close.
+        for I := ThreadStack.Count - 1 downto 0 do
+        begin
+          TopId := ThreadStack[I];
+          if ThreadTimings.TryGetValue(TopId, TopEntry) and (TopEntry.TraceId = ActiveTraceId) then
+          begin
+            if TopEntry.ParentSpanId = '' then
+              RootId := TopId
+            else
+            begin
+              SetLength(OpenChildIds, ChildCount + 1);
+              OpenChildIds[ChildCount] := TopId;
+              Inc(ChildCount);
+            end;
+          end;
+        end;
+      end;
+    end;
+  finally
+    FPendingTimingsLock.Leave;
+  end;
+
+  if ActiveTraceId = '' then
+  begin
+    Log(llDebug, 'EndTrace: no active trace on this thread', 'exewatch');
+    Exit;
+  end;
+
+  // Force-close any child timings left open (forgotten EndTiming) as failed, so
+  // the tree is complete; then close the root (reuses EndTiming's span emit).
+  for I := 0 to ChildCount - 1 do
+    EndTiming(OpenChildIds[I], nil, False);
+
+  if RootId <> '' then
+    Result := EndTiming(RootId, nil, True);
 end;
 
 function TExeWatch.IsTimingActive(const AId: string): Boolean;

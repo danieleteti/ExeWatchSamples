@@ -232,6 +232,15 @@ object MainForm: TMainForm
       TabOrder = 0
       OnClick = btnConcurrentTimingsClick
     end
+    object btnNestedTrace: TButton
+      Left = 352
+      Top = 26
+      Width = 320
+      Height = 33
+      Caption = 'Nested Trace (profiler tree)'
+      TabOrder = 1
+      OnClick = btnNestedTraceClick
+    end
   end
   object btnClearLog: TButton
     Left = 632

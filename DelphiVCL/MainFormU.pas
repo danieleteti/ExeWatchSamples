@@ -1,4 +1,4 @@
-﻿{ *******************************************************************************
+{ *******************************************************************************
   ExeWatch VCL Sample Application
 
   This demo shows how to use every feature of the ExeWatch Delphi SDK.
@@ -54,6 +54,7 @@ type
     btnCounter3: TButton;
     grpThreadSafety: TGroupBox;
     btnConcurrentTimings: TButton;
+    btnNestedTrace: TButton;
     procedure FormCreate(Sender: TObject);
     procedure btnDebugClick(Sender: TObject);
     procedure btnInfoClick(Sender: TObject);
@@ -73,6 +74,7 @@ type
     procedure btnIncrementCounter2Click(Sender: TObject);
     procedure btnCounter3Click(Sender: TObject);
     procedure btnConcurrentTimingsClick(Sender: TObject);
+    procedure btnNestedTraceClick(Sender: TObject);
   private
     procedure Log(const AMessage: string);
     procedure OnEWError(const ErrorMessage: string);
@@ -611,6 +613,75 @@ begin
     Log(Format('Dashboard aggregates them all under a single ''%s'' operation.', [TIMING_ID]));
   finally
     Gate.Free;
+  end;
+end;
+
+{ ============================================================================
+  NESTED TRACE — profiler-style tree of nested timings.
+
+  StartTrace opens a NAMED ROOT. Every EW.StartTiming/EndTiming you call before
+  EW.EndTrace nests UNDER it (on the same thread), so the dashboard can show the
+  whole operation as a waterfall: which sub-step took the time, and how often a
+  step ran.
+
+    EW.StartTrace('GenerateInvoiceReport');
+      EW.StartTiming('LoadCustomers'); ... EW.EndTiming('LoadCustomers');
+      // a loop: the same id repeated is merged into one node with a count
+      for ... EW.StartTiming('RenderRow'); ... EW.EndTiming('RenderRow');
+    EW.EndTrace;
+
+  - Single-thread / synchronous: a timing started on another thread is NOT part
+    of the trace (measuring across threads would just capture scheduling noise).
+  - In the dashboard log list the root shows a trace badge — click it to open
+    the waterfall. Child steps do not clutter the list.
+  ============================================================================ }
+procedure TMainForm.btnNestedTraceClick(Sender: TObject);
+var
+  TraceId: string;
+  Total: Double;
+  I: Integer;
+begin
+  Log('-- Nested Trace demo (profiler-style tree) --');
+
+  // Open the named root. Returns the trace id (handy for correlation/logging).
+  TraceId := EW.StartTrace('GenerateInvoiceReport');
+  Log('Trace started: GenerateInvoiceReport (' + TraceId + ')');
+  try
+    // Step 1 — a child span.
+    EW.StartTiming('LoadCustomers', 'db');
+    Sleep(40);
+    EW.EndTiming('LoadCustomers');
+
+    // Step 2 — a loop. The same 'RenderRow' id runs many times; the dashboard
+    // merges these siblings into ONE node showing the count + avg/min/max,
+    // exactly like a real profiler call tree.
+    EW.StartTiming('Transform', 'cpu');
+    for I := 1 to 5 do
+    begin
+      EW.StartTiming('RenderRow', 'cpu');
+      Sleep(10 + Random(15));
+      EW.EndTiming('RenderRow');
+    end;
+    EW.EndTiming('Transform');
+
+    // Step 3 — a grandchild (Flush nested inside WriteFile) to show real depth.
+    EW.StartTiming('WriteFile', 'io');
+    Sleep(20);
+    EW.StartTiming('Flush', 'io');
+    Sleep(15);
+    EW.EndTiming('Flush');
+    EW.EndTiming('WriteFile');
+
+    Total := EW.EndTrace;  // closes the root and ships the whole tree
+    Log(Format('Trace finished in %.0f ms.', [Total]));
+    Log('Open the dashboard log list and click the "GenerateInvoiceReport" trace');
+    Log('badge to see the waterfall (RenderRow appears once, with x5).');
+  except
+    on E: Exception do
+    begin
+      EW.EndTrace;  // always close the trace, even on failure
+      Log('Trace failed: ' + E.Message);
+    end;
   end;
 end;
 
