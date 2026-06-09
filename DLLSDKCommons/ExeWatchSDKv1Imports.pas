@@ -78,9 +78,17 @@ const
   {$ENDIF}
 
   // --- Import unit ABI version ---
-  // IMPORTANT: This MUST match EW_DLL_ABI_VERSION in the DLL.
-  // Increment BOTH whenever the DLL interface changes (new exports,
-  // changed signatures, changed record layouts, etc.)
+  // The minimum DLL ABI this import unit needs. The compatibility check is
+  // FORWARD-COMPATIBLE: it accepts any DLL whose ABI is >= this value, so a
+  // newer DLL can be dropped in under an app built against an older import
+  // unit without recompiling — upgrades are smooth.
+  //
+  // CONTRACT FOR MAINTAINERS: keep every ABI bump ADDITIVE — only ADD new
+  // exports, never change an existing export's signature or a shared record's
+  // layout (TEWDLLConfig grows only by appending fields, guarded by
+  // StructSize). Bump BOTH this and EW_DLL_ABI_VERSION when adding exports.
+  // A genuinely breaking change would need a new compatibility strategy
+  // (the forward-compatible `>=` check assumes additive-only evolution).
   EW_IMPORT_ABI_VERSION = 4;
 
 type
@@ -411,7 +419,13 @@ var
   DLLVersion: Integer;
 begin
   DLLVersion := ew_GetABIVersion;
-  if DLLVersion <> EW_IMPORT_ABI_VERSION then
+  // Forward-compatible check: accept any DLL whose ABI is >= what this import
+  // unit was built against. The DLL only ever ADDS exports between versions
+  // (existing exports keep their signatures), so a NEWER DLL still provides
+  // every function an older caller uses — dropping in a newer DLL "just works"
+  // without recompiling the host app. Reject only a DLL that is OLDER than
+  // required, since it would be missing exports this import unit may call.
+  if DLLVersion < EW_IMPORT_ABI_VERSION then
     Result := EW_ERR_VERSION_MISMATCH
   else
     Result := EW_OK;
@@ -716,10 +730,12 @@ begin
     Exit;
   end;
 
-  // Verify ABI compatibility
+  // Verify ABI compatibility (forward-compatible: a newer DLL is fine because
+  // exports are only ever added; reject only an older DLL that lacks exports
+  // this import unit needs).
   if Assigned(ew_GetABIVersion) then
   begin
-    if ew_GetABIVersion <> EW_IMPORT_ABI_VERSION then
+    if ew_GetABIVersion < EW_IMPORT_ABI_VERSION then
     begin
       EWUnloadDLL;
       Result := False;

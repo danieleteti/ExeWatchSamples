@@ -158,9 +158,12 @@ static int EwResolveAll(void) {
     EW_BIND(ew_SetOnLogsSent);
     EW_BIND(ew_SetOnDeviceInfoSent);
 
-    /* ABI sanity check -- make sure the header we compiled against matches
-       what the DLL actually exports. */
-    if (ew_GetABIVersion() != EW_IMPORT_ABI_VERSION)
+    /* ABI compatibility check. Forward-compatible: the DLL only ever ADDS
+       exports between versions (existing exports keep their signatures), so a
+       NEWER DLL still provides every function this header knows about -- a
+       drop-in newer DLL "just works". Accept ABI >= what we compiled against;
+       reject only an OLDER DLL that would be missing exports we may call. */
+    if (ew_GetABIVersion() < EW_IMPORT_ABI_VERSION)
         return EW_ERR_VERSION_MISMATCH;
 
     return EW_OK;

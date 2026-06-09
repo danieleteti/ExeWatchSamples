@@ -95,7 +95,12 @@ extern "C" {
 #define EW_BT_MESSAGE     14
 #define EW_BT_DEBUG       15
 
-/* --- ABI version (must match DLL) --- */
+/* --- ABI version ---
+   The minimum DLL ABI this header needs. The loader's check is FORWARD-
+   COMPATIBLE: it accepts any DLL whose ABI is >= this value, so a newer DLL
+   drops in under code built against an older header without recompiling.
+   Maintainers: keep every ABI bump ADDITIVE (only add exports; never change an
+   existing export's signature or a shared struct layout). */
 #define EW_IMPORT_ABI_VERSION 4
 
 /* --- DLL name --- */
