@@ -835,12 +835,30 @@ public sealed class ExeWatchClient : IDisposable
                 }
             }
 
-            threadTimings[id] = new TimingEntry
+            var entry = new TimingEntry
             {
                 StartTicks = Stopwatch.GetTimestamp(),
                 Tag = tag,
                 Metadata = metadata
             };
+
+            // Nested timing traces: inherit the trace from the span currently on
+            // top of the stack. Only spans inside an active trace (parent
+            // TraceId != "") get ids, so a plain nested StartTiming without
+            // StartTrace stays flat (TraceId "").
+            if (threadStack.Count > 0)
+            {
+                var parentId = threadStack[^1];
+                if (threadTimings.TryGetValue(parentId, out var parentEntry) &&
+                    !string.IsNullOrEmpty(parentEntry.TraceId))
+                {
+                    entry.TraceId = parentEntry.TraceId;
+                    entry.ParentSpanId = parentEntry.SpanId;
+                    entry.SpanId = PlatformHelper.GenerateId16();
+                }
+            }
+
+            threadTimings[id] = entry;
             threadStack.Add(id);
         }
 
@@ -926,6 +944,16 @@ public sealed class ExeWatchClient : IDisposable
             extraData["metadata"] = merged;
         }
 
+        // Nested timing traces: emit the span's tree position so the backend can
+        // reconstruct the trace. parent_span_id "" marks the root (the backend
+        // maps it to NULL).
+        if (!string.IsNullOrEmpty(entry.TraceId))
+        {
+            extraData["trace_id"] = entry.TraceId;
+            extraData["span_id"] = entry.SpanId;
+            extraData["parent_span_id"] = entry.ParentSpanId;
+        }
+
         var tag = !string.IsNullOrEmpty(entry.Tag) ? entry.Tag : "timing";
         Log(LogLevel.Info, $"Timing: {id} completed in {durationMs:F2}ms", tag, extraData);
 
@@ -947,6 +975,130 @@ public sealed class ExeWatchClient : IDisposable
             lastId = threadStack[^1];
         }
         return EndTiming(lastId);
+    }
+
+    // ======== NESTED TIMING TRACES ========
+    //
+    // A trace is a profiler-style tree of nested timings, reconstructed at the
+    // backend from flat spans. Single-thread / synchronous: nesting is
+    // determined by the per-thread LIFO stack of open timings. Mirrors the
+    // Delphi native StartTrace/EndTrace.
+
+    /// <summary>
+    /// Opens a named root timing and starts a trace. Subsequent StartTiming
+    /// calls (until EndTrace) become child spans of the trace. Returns the
+    /// generated trace_id (16-hex). If a trace is already active on this thread,
+    /// degrades to a normal child timing and returns the active trace_id.
+    /// </summary>
+    public string StartTrace(string name)
+    {
+        if (string.IsNullOrEmpty(name))
+            return "";
+
+        int threadId = Environment.CurrentManagedThreadId;
+        string activeTraceId = "";
+
+        // Is a trace already open on this thread? (top-of-stack span carries its trace id)
+        lock (_timingLock)
+        {
+            if (_timings.TryGetValue(threadId, out var threadTimings) &&
+                _timingStacks.TryGetValue(threadId, out var threadStack) &&
+                threadStack.Count > 0)
+            {
+                var topId = threadStack[^1];
+                if (threadTimings.TryGetValue(topId, out var topEntry))
+                    activeTraceId = topEntry.TraceId;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(activeTraceId))
+        {
+            // No nested traces — degrade to a child span under the active trace.
+            Log(LogLevel.Debug, $"StartTrace(\"{name}\") while a trace is active — nesting as a child span", "exewatch");
+            StartTiming(name);
+            return activeTraceId;
+        }
+
+        // Open a new root: create the entry via the robust StartTiming path
+        // (handles per-thread dict/stack creation, eviction), then promote it to
+        // a root by stamping its trace/span ids. At stack-empty StartTiming
+        // leaves it flat.
+        StartTiming(name);
+        var newTraceId = PlatformHelper.GenerateId16();
+
+        lock (_timingLock)
+        {
+            if (_timings.TryGetValue(threadId, out var threadTimings) &&
+                threadTimings.TryGetValue(name, out var rootEntry))
+            {
+                rootEntry.TraceId = newTraceId;
+                rootEntry.SpanId = PlatformHelper.GenerateId16();
+                rootEntry.ParentSpanId = ""; // root
+                return newTraceId;
+            }
+        }
+
+        return "";
+    }
+
+    /// <summary>
+    /// Closes the active trace: force-closes any still-open child timings as
+    /// failed (success=false), then closes the root (emitting its span). Returns
+    /// the root's total duration in ms, or -1 if no trace is active.
+    /// </summary>
+    public double EndTrace()
+    {
+        int threadId = Environment.CurrentManagedThreadId;
+        string activeTraceId = "";
+        string rootId = "";
+        var openChildIds = new List<string>();
+
+        lock (_timingLock)
+        {
+            if (_timings.TryGetValue(threadId, out var threadTimings) &&
+                _timingStacks.TryGetValue(threadId, out var threadStack) &&
+                threadStack.Count > 0)
+            {
+                var topId = threadStack[^1];
+                if (threadTimings.TryGetValue(topId, out var topEntry))
+                    activeTraceId = topEntry.TraceId;
+
+                if (!string.IsNullOrEmpty(activeTraceId))
+                {
+                    // Walk the stack top-down: the root carries ParentSpanId "";
+                    // everything else of this trace still open is a forgotten
+                    // child to force-close.
+                    for (int i = threadStack.Count - 1; i >= 0; i--)
+                    {
+                        var id = threadStack[i];
+                        if (threadTimings.TryGetValue(id, out var e) && e.TraceId == activeTraceId)
+                        {
+                            if (string.IsNullOrEmpty(e.ParentSpanId))
+                                rootId = id;
+                            else
+                                openChildIds.Add(id);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (string.IsNullOrEmpty(activeTraceId))
+        {
+            Log(LogLevel.Debug, "EndTrace: no active trace on this thread", "exewatch");
+            return -1;
+        }
+
+        // Force-close any child timings left open (forgotten EndTiming) as
+        // failed, so the tree is complete; then close the root (reuses
+        // EndTiming's span emit).
+        foreach (var childId in openChildIds)
+            EndTiming(childId, null, false);
+
+        if (!string.IsNullOrEmpty(rootId))
+            return EndTiming(rootId, null, true);
+
+        return -1;
     }
 
     public bool IsTimingActive(string id)

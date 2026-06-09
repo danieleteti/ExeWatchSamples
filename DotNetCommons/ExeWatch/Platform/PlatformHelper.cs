@@ -168,4 +168,14 @@ internal static class PlatformHelper
     {
         return Guid.NewGuid().ToString("N")[..16];
     }
+
+    /// <summary>
+    /// 16-hex random id for nested timing traces (trace_id / span_id).
+    /// Mirrors the session-id scheme: a GUID with separators stripped,
+    /// first 16 chars.
+    /// </summary>
+    public static string GenerateId16()
+    {
+        return Guid.NewGuid().ToString("N")[..16];
+    }
 }

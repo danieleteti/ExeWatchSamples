@@ -62,6 +62,8 @@ public static class EW
     public static double EndTiming(string id, Dictionary<string, object>? endMetadata = null, bool success = true)
         => ExeWatchSdk.EndTiming(id, endMetadata, success);
     public static double EndTiming() => ExeWatchSdk.EndTiming();
+    public static string StartTrace(string name) => ExeWatchSdk.StartTrace(name);
+    public static double EndTrace() => ExeWatchSdk.EndTrace();
     public static bool IsTimingActive(string id) => ExeWatchSdk.IsTimingActive(id);
     public static void CancelTiming(string id) => ExeWatchSdk.CancelTiming(id);
     public static void CancelTiming() => ExeWatchSdk.CancelTiming();
