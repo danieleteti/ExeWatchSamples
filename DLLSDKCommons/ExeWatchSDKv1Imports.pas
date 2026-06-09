@@ -81,7 +81,7 @@ const
   // IMPORTANT: This MUST match EW_DLL_ABI_VERSION in the DLL.
   // Increment BOTH whenever the DLL interface changes (new exports,
   // changed signatures, changed record layouts, etc.)
-  EW_IMPORT_ABI_VERSION = 3;
+  EW_IMPORT_ABI_VERSION = 4;
 
 type
   // --- Config record (must match DLL exactly) ---
@@ -142,6 +142,10 @@ function EWErrorWithStackTrace(const AMsg: string; const ATag: string;
 function EWAddBreadcrumb(ABreadcrumbType: Integer; const ACategory, AMsg: string; const ADataJson: string = ''): Integer;
 function EWStartTiming(const AId: string; const ATag: string = ''): Integer;
 function EWEndTiming(const AId: string; out AElapsedMs: Double): Integer;
+// Nested timing traces. EWStartTrace returns the generated 16-hex trace id
+// (empty string on error — check EWGetLastError).
+function EWStartTrace(const AName: string): string;
+function EWEndTrace(out AElapsedMs: Double): Integer;
 function EWSetUser(const AId: string; const AEmail: string = ''; const AName: string = ''): Integer;
 function EWSetTag(const AKey, AValue: string): Integer;
 function EWRemoveTag(const AKey: string): Integer;
@@ -189,6 +193,10 @@ function ew_EndTiming(Id: PWideChar; out ElapsedMs: Double): Integer; stdcall; e
 function ew_EndLastTiming(out ElapsedMs: Double): Integer; stdcall; external EXEWATCH_DLL;
 function ew_CancelTiming(Id: PWideChar): Integer; stdcall; external EXEWATCH_DLL;
 function ew_IsTimingActive(Id: PWideChar): LongBool; stdcall; external EXEWATCH_DLL;
+
+// Nested timing traces
+function ew_StartTrace(Name, Buffer: PWideChar; BufLen: Integer): Integer; stdcall; external EXEWATCH_DLL;
+function ew_EndTrace(out ElapsedMs: Double): Integer; stdcall; external EXEWATCH_DLL;
 
 // Metrics
 function ew_IncrementCounter(Name: PWideChar; Value: Double; Tag: PWideChar): Integer; stdcall; external EXEWATCH_DLL;
@@ -252,6 +260,9 @@ type
   Tew_EndLastTiming = function(out ElapsedMs: Double): Integer; stdcall;
   Tew_CancelTiming = function(Id: PWideChar): Integer; stdcall;
   Tew_IsTimingActive = function(Id: PWideChar): LongBool; stdcall;
+  // Nested timing traces
+  Tew_StartTrace = function(Name, Buffer: PWideChar; BufLen: Integer): Integer; stdcall;
+  Tew_EndTrace = function(out ElapsedMs: Double): Integer; stdcall;
   // Metrics
   Tew_IncrementCounter = function(Name: PWideChar; Value: Double; Tag: PWideChar): Integer; stdcall;
   Tew_RecordGauge = function(Name: PWideChar; Value: Double; Tag: PWideChar): Integer; stdcall;
@@ -305,6 +316,9 @@ var
   ew_EndLastTiming: Tew_EndLastTiming;
   ew_CancelTiming: Tew_CancelTiming;
   ew_IsTimingActive: Tew_IsTimingActive;
+  // Nested timing traces
+  ew_StartTrace: Tew_StartTrace;
+  ew_EndTrace: Tew_EndTrace;
   // Metrics
   ew_IncrementCounter: Tew_IncrementCounter;
   ew_RecordGauge: Tew_RecordGauge;
@@ -492,6 +506,26 @@ begin
   Result := ew_EndTiming(PWideChar(WId), AElapsedMs);
 end;
 
+function EWStartTrace(const AName: string): string;
+var
+  WName: EWString;
+  Buf: array[0..63] of WideChar;  // trace id is 16 hex; 64 is ample
+  W: WideString;
+begin
+  Result := '';
+  WName := EWStr(AName);
+  if ew_StartTrace(PWideChar(WName), @Buf[0], Length(Buf)) = EW_OK then
+  begin
+    W := WideString(PWideChar(@Buf[0]));
+    Result := string(W);
+  end;
+end;
+
+function EWEndTrace(out AElapsedMs: Double): Integer;
+begin
+  Result := ew_EndTrace(AElapsedMs);
+end;
+
 function EWSetUser(const AId: string; const AEmail: string; const AName: string): Integer;
 var
   WId, WEmail, WName: EWString;
@@ -582,6 +616,8 @@ begin
   @ew_EndLastTiming := nil;
   @ew_CancelTiming := nil;
   @ew_IsTimingActive := nil;
+  @ew_StartTrace := nil;
+  @ew_EndTrace := nil;
   @ew_IncrementCounter := nil;
   @ew_RecordGauge := nil;
   @ew_SetUser := nil;
@@ -642,6 +678,9 @@ begin
   @ew_EndLastTiming := GetProcAddress(GDLLHandle, 'ew_EndLastTiming');
   @ew_CancelTiming := GetProcAddress(GDLLHandle, 'ew_CancelTiming');
   @ew_IsTimingActive := GetProcAddress(GDLLHandle, 'ew_IsTimingActive');
+  // Nested timing traces
+  @ew_StartTrace := GetProcAddress(GDLLHandle, 'ew_StartTrace');
+  @ew_EndTrace := GetProcAddress(GDLLHandle, 'ew_EndTrace');
   // Metrics
   @ew_IncrementCounter := GetProcAddress(GDLLHandle, 'ew_IncrementCounter');
   @ew_RecordGauge := GetProcAddress(GDLLHandle, 'ew_RecordGauge');

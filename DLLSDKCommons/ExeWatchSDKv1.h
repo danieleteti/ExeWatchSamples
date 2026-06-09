@@ -96,7 +96,7 @@ extern "C" {
 #define EW_BT_DEBUG       15
 
 /* --- ABI version (must match DLL) --- */
-#define EW_IMPORT_ABI_VERSION 3
+#define EW_IMPORT_ABI_VERSION 4
 
 /* --- DLL name --- */
 #ifdef _WIN64
@@ -166,6 +166,11 @@ typedef int  (__stdcall *PFN_ew_EndTiming)        (const wchar_t* Id, double* El
 typedef int  (__stdcall *PFN_ew_EndLastTiming)    (double* ElapsedMs);
 typedef int  (__stdcall *PFN_ew_CancelTiming)     (const wchar_t* Id);
 typedef BOOL (__stdcall *PFN_ew_IsTimingActive)   (const wchar_t* Id);
+
+/* Nested timing traces. ew_StartTrace writes the 16-hex trace id into Buffer
+   (two-call pattern: pass Buffer=NULL/BufLen=0 to query the required size). */
+typedef int  (__stdcall *PFN_ew_StartTrace)       (const wchar_t* Name, wchar_t* Buffer, int BufLen);
+typedef int  (__stdcall *PFN_ew_EndTrace)         (double* ElapsedMs);
 
 typedef int  (__stdcall *PFN_ew_IncrementCounter) (const wchar_t* Name, double Value, const wchar_t* Tag);
 typedef int  (__stdcall *PFN_ew_RecordGauge)      (const wchar_t* Name, double Value, const wchar_t* Tag);
@@ -243,6 +248,9 @@ extern PFN_ew_EndLastTiming        ew_EndLastTiming;
 extern PFN_ew_CancelTiming         ew_CancelTiming;
 extern PFN_ew_IsTimingActive       ew_IsTimingActive;
 
+extern PFN_ew_StartTrace           ew_StartTrace;
+extern PFN_ew_EndTrace             ew_EndTrace;
+
 extern PFN_ew_IncrementCounter     ew_IncrementCounter;
 extern PFN_ew_RecordGauge          ew_RecordGauge;
 
@@ -301,6 +309,10 @@ int  __stdcall ew_EndTiming(const wchar_t* Id, double* ElapsedMs);
 int  __stdcall ew_EndLastTiming(double* ElapsedMs);
 int  __stdcall ew_CancelTiming(const wchar_t* Id);
 BOOL __stdcall ew_IsTimingActive(const wchar_t* Id);
+
+/* Nested timing traces */
+int  __stdcall ew_StartTrace(const wchar_t* Name, wchar_t* Buffer, int BufLen);
+int  __stdcall ew_EndTrace(double* ElapsedMs);
 
 /* Metrics */
 int __stdcall ew_IncrementCounter(const wchar_t* Name, double Value, const wchar_t* Tag);

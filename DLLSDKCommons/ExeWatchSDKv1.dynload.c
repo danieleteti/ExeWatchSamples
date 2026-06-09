@@ -61,6 +61,9 @@ PFN_ew_EndLastTiming        ew_EndLastTiming        = NULL;
 PFN_ew_CancelTiming         ew_CancelTiming         = NULL;
 PFN_ew_IsTimingActive       ew_IsTimingActive       = NULL;
 
+PFN_ew_StartTrace           ew_StartTrace           = NULL;
+PFN_ew_EndTrace             ew_EndTrace             = NULL;
+
 PFN_ew_IncrementCounter     ew_IncrementCounter     = NULL;
 PFN_ew_RecordGauge          ew_RecordGauge          = NULL;
 
@@ -125,6 +128,9 @@ static int EwResolveAll(void) {
     EW_BIND(ew_EndLastTiming);
     EW_BIND(ew_CancelTiming);
     EW_BIND(ew_IsTimingActive);
+
+    EW_BIND(ew_StartTrace);
+    EW_BIND(ew_EndTrace);
 
     EW_BIND(ew_IncrementCounter);
     EW_BIND(ew_RecordGauge);
@@ -213,6 +219,7 @@ void ew_UnloadSDK(void) {
     ew_StartTiming = NULL;          ew_EndTiming = NULL;
     ew_EndLastTiming = NULL;        ew_CancelTiming = NULL;
     ew_IsTimingActive = NULL;
+    ew_StartTrace = NULL;           ew_EndTrace = NULL;
 
     ew_IncrementCounter = NULL;     ew_RecordGauge = NULL;
 
