@@ -138,6 +138,33 @@ for (int i = 1; i <= TimingIterations; i++)
 Console.WriteLine("  Check the Timing page in the dashboard to see Avg, Min, Max, P95, and Success Rate.");
 
 // -------------------------------------------------------
+// 6b. NESTED TIMING TRACE (waterfall profiler)
+//     StartTrace opens a trace; every StartTiming/EndTiming
+//     between StartTrace and EndTrace nests as a child span
+//     (per-thread LIFO). The dashboard renders the result as
+//     a waterfall, so you can see exactly where time is spent.
+//     A loop that reuses the same timing id (RenderRow below)
+//     merges into a single node with an aggregated duration.
+// -------------------------------------------------------
+Console.WriteLine("\nRunning a nested timing trace (GenerateInvoiceReport)...");
+
+EW.StartTrace("GenerateInvoiceReport");
+
+EW.StartTiming("LoadCustomers", "db"); Thread.Sleep(40); EW.EndTiming("LoadCustomers");
+
+EW.StartTiming("Transform", "cpu");
+for (int i = 0; i < 5; i++) { EW.StartTiming("RenderRow", "cpu"); Thread.Sleep(10); EW.EndTiming("RenderRow"); }
+EW.EndTiming("Transform");
+
+EW.StartTiming("WriteFile", "io"); Thread.Sleep(20);
+EW.StartTiming("Flush", "io"); Thread.Sleep(15); EW.EndTiming("Flush");
+EW.EndTiming("WriteFile");
+
+double traceTotalMs = EW.EndTrace();
+Console.WriteLine($"  Trace completed in {traceTotalMs:F1} ms.");
+Console.WriteLine("  Open the Timing page and click the trace root to see the waterfall view.");
+
+// -------------------------------------------------------
 // 7. CUSTOM METRICS
 //    Counters accumulate values over time (e.g., items
 //    processed, bytes transferred). Gauges record a

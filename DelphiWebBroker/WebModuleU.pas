@@ -20,6 +20,8 @@ type
       Request: TWebRequest; Response: TWebResponse; var Handled: Boolean);
     procedure WebModule1APIDelayAction(Sender: TObject;
       Request: TWebRequest; Response: TWebResponse; var Handled: Boolean);
+    procedure WebModule1APITraceAction(Sender: TObject;
+      Request: TWebRequest; Response: TWebResponse; var Handled: Boolean);
   private
     function HandleRequest(Request: TWebRequest; Response: TWebResponse;
       const Endpoint: string; Handler: TProc): Boolean;
@@ -246,6 +248,88 @@ begin
         JSON.Free;
       end;
     end);
+end;
+
+// ---------------------------------------------------------------------------
+//  GET /api/trace  ->  Nested Timing Trace demo
+// ---------------------------------------------------------------------------
+//
+//  Produces a profiler-style "waterfall" of one request's work in ExeWatch.
+//  EW.StartTrace opens a named ROOT trace and returns a 16-hex trace id; every
+//  EW.StartTiming / EW.EndTiming run before EW.EndTrace auto-nests under it via
+//  the SDK's per-thread LIFO stack. A WebBroker action runs entirely on the
+//  request thread, so the whole tree is captured in order: ValidateRequest,
+//  then QueryDatabase (with OpenConnection + RunQuery as children), then
+//  SerializeJson. This action handles the trace directly (instead of the shared
+//  HandleRequest helper) so the trace is a clean ROOT span; the existing flat
+//  StartTiming/EndTiming endpoints are untouched. EndTrace runs on every path.
+//
+procedure TWebModule1.WebModule1APITraceAction(Sender: TObject;
+  Request: TWebRequest; Response: TWebResponse; var Handled: Boolean);
+var
+  LTraceId: string;
+  LTotalMs: Double;
+  JSON: TJSONObject;
+begin
+  Handled := True;
+  TInterlocked.Increment(GRequestCount);
+  EW.IncrementCounter('http.requests', 1);
+  EW.AddBreadcrumb('request: GET /api/trace', 'http');
+
+  LTraceId := EW.StartTrace('HandleApiTrace');
+  try
+    EW.StartTiming('ValidateRequest', 'http');
+    Sleep(5);
+    EW.EndTiming('ValidateRequest', nil, True);
+
+    EW.StartTiming('QueryDatabase', 'db');
+    EW.StartTiming('OpenConnection', 'db');
+    Sleep(10);
+    EW.EndTiming('OpenConnection', nil, True);
+    EW.StartTiming('RunQuery', 'db');
+    Sleep(20);
+    EW.EndTiming('RunQuery', nil, True);
+    EW.EndTiming('QueryDatabase', nil, True);
+
+    EW.StartTiming('SerializeJson', 'cpu');
+    Sleep(8);
+    EW.EndTiming('SerializeJson', nil, True);
+
+    LTotalMs := EW.EndTrace;
+  except
+    on E: Exception do
+    begin
+      TInterlocked.Increment(GErrorCount);
+      EW.IncrementCounter('http.errors', 1);
+      EW.EndTrace;
+      EW.ErrorWithException(E, 'GET /api/trace');
+      Response.StatusCode := 500;
+      Response.Content := '{"error":"Internal Server Error","message":"' + E.Message + '"}';
+      Response.ContentType := 'application/json';
+      Exit;
+    end;
+  end;
+
+  EW.Info(Format('Trace "HandleApiTrace" completed (id %s) in ~%.0f ms',
+    [LTraceId, LTotalMs]), 'trace');
+
+  JSON := TJSONObject.Create;
+  try
+    JSON.AddPair('trace_id', LTraceId);
+    JSON.AddPair('total_ms', TJSONNumber.Create(LTotalMs));
+    JSON.AddPair('spans', TJSONArray.Create
+      .Add('ValidateRequest')
+      .Add('QueryDatabase')
+      .Add('QueryDatabase.OpenConnection')
+      .Add('QueryDatabase.RunQuery')
+      .Add('SerializeJson'));
+    JSON.AddPair('note', 'Open the Timing / Traces page in ExeWatch to see the waterfall.');
+    Response.Content := JSON.ToString;
+    Response.ContentType := 'application/json';
+    Response.StatusCode := 200;
+  finally
+    JSON.Free;
+  end;
 end;
 
 end.

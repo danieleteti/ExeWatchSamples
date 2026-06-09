@@ -54,6 +54,7 @@ partial class MainForm
         lblTimingDesc = new Label();
         grpTimingBasic = new GroupBox();
         btnTimingNested = new Button();
+        btnTimingTrace = new Button();
         btnTimingParallel = new Button();
         btnTimingLIFO = new Button();
         btnTimingFormat = new Button();
@@ -336,6 +337,11 @@ partial class MainForm
         btnTimingFormat.Size = new Size(80, 28);
         btnTimingFormat.Click += BtnTimingFormat_Click;
 
+        btnTimingTrace.Text = "Trace";
+        btnTimingTrace.Location = new Point(350, 25);
+        btnTimingTrace.Size = new Size(90, 28);
+        btnTimingTrace.Click += BtnTimingTrace_Click;
+
         btnTimingAll.Text = "Run All";
         btnTimingAll.Location = new Point(500, 25);
         btnTimingAll.Size = new Size(80, 28);
@@ -343,6 +349,7 @@ partial class MainForm
         btnTimingAll.Click += BtnTimingAll_Click;
 
         grpTimingBasic.Controls.Add(btnTimingNested);
+        grpTimingBasic.Controls.Add(btnTimingTrace);
         grpTimingBasic.Controls.Add(btnTimingParallel);
         grpTimingBasic.Controls.Add(btnTimingLIFO);
         grpTimingBasic.Controls.Add(btnTimingFormat);
@@ -657,6 +664,7 @@ partial class MainForm
     private Label lblTimingDesc;
     private GroupBox grpTimingBasic;
     private Button btnTimingNested;
+    private Button btnTimingTrace;
     private Button btnTimingParallel;
     private Button btnTimingLIFO;
     private Button btnTimingFormat;

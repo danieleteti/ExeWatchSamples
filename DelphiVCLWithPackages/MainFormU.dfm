@@ -274,6 +274,22 @@ object MainForm: TMainForm
         TabOrder = 4
         OnClick = btnUnloadAllClick
       end
+      object btnNestedTrace: TButton
+        Left = 510
+        Top = 220
+        Width = 160
+        Height = 33
+        Anchors = [akTop, akRight]
+        Caption = 'Nested Trace (profiler tree)'
+        Font.Charset = DEFAULT_CHARSET
+        Font.Color = clWindowText
+        Font.Height = -12
+        Font.Name = 'Segoe UI'
+        Font.Style = []
+        ParentFont = False
+        TabOrder = 5
+        OnClick = btnNestedTraceClick
+      end
     end
   end
   object pnlBottom: TPanel

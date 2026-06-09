@@ -87,6 +87,16 @@ object MainForm: TMainForm
       Text = 'Measure Operation'
       OnClick = btnTimingClick
     end
+    object btnNestedTrace: TButton
+      Position.X = 224.000000000000000000
+      Position.Y = 26.000000000000000000
+      Size.Width = 104.000000000000000000
+      Size.Height = 33.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 1
+      Text = 'Nested Trace (profiler tree)'
+      OnClick = btnNestedTraceClick
+    end
   end
   object grpBreadcrumbs: TGroupBox
     Position.X = 368.000000000000000000

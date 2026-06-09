@@ -226,6 +226,15 @@ object MainForm: TMainForm
     TabOrder = 6
     OnClick = btnClearLogClick
   end
+  object btnNestedTrace: TButton
+    Left = 8
+    Top = 369
+    Width = 320
+    Height = 25
+    Caption = 'Nested Trace (profiler tree)'
+    TabOrder = 8
+    OnClick = btnNestedTraceClick
+  end
   object Memo1: TMemo
     Left = 8
     Top = 400

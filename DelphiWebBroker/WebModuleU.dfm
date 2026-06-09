@@ -30,6 +30,11 @@ object WebModule1: TWebModule1
       Name = 'APIDelay'
       PathInfo = '/api/delay'
       OnAction = WebModule1APIDelayAction
+    end
+    item
+      Name = 'APITrace'
+      PathInfo = '/api/trace'
+      OnAction = WebModule1APITraceAction
     end>
   Height = 230
   Width = 415

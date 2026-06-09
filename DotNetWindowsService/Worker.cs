@@ -165,6 +165,27 @@ public class Worker : BackgroundService
                 throw;
             }
 
+            // --- Sub-operation 3: Nested timing trace (waterfall profiler) ---
+            // StartTrace opens a trace; every StartTiming/EndTiming between
+            // StartTrace and EndTrace nests as a child span (per-thread LIFO).
+            // The dashboard renders this as a waterfall so you can see exactly
+            // where time is spent. The RenderRow loop reuses one timing id, so
+            // those iterations merge into a single aggregated node.
+            EW.StartTrace("GenerateInvoiceReport");
+
+            EW.StartTiming("LoadCustomers", "db"); Thread.Sleep(40); EW.EndTiming("LoadCustomers");
+
+            EW.StartTiming("Transform", "cpu");
+            for (int i = 0; i < 5; i++) { EW.StartTiming("RenderRow", "cpu"); Thread.Sleep(10); EW.EndTiming("RenderRow"); }
+            EW.EndTiming("Transform");
+
+            EW.StartTiming("WriteFile", "io"); Thread.Sleep(20);
+            EW.StartTiming("Flush", "io"); Thread.Sleep(15); EW.EndTiming("Flush");
+            EW.EndTiming("WriteFile");
+
+            double traceTotalMs = EW.EndTrace();
+            EW.Debug($"Trace GenerateInvoiceReport took {traceTotalMs:F1} ms — see the waterfall on the Timing page", "worker");
+
             // Outer timing: success (all sub-operations completed)
             EW.EndTiming("process_cycle");
 

@@ -107,6 +107,29 @@ int wmain()
     ew_EndTiming(L"generate_report", &elapsed_ms);
     wprintf(L"Report generated in %.1f ms\n", elapsed_ms);
 
+    // 5b. Nested timing trace -- a profiler-style tree of nested timings.
+    //     ew_StartTrace opens a named root and fills a caller buffer with the
+    //     16-hex trace id; every StartTiming/EndTiming until ew_EndTrace nests
+    //     as a child span. The 'render_row' loop reuses one id, so the
+    //     dashboard merges those siblings into one node (count + avg/min/max),
+    //     just like a real profiler call tree. Old flat ew_StartTiming usage
+    //     above is unaffected -- the trace API is purely additive.
+    wchar_t trace_id[64] = {0};
+    ew_StartTrace(L"GenerateInvoiceReport", trace_id, 64);
+    wprintf(L"Trace started: GenerateInvoiceReport (%ls)\n", trace_id);
+    ew_StartTiming(L"load_customers", L"db"); Sleep(40); ew_EndTiming(L"load_customers", &elapsed_ms);
+    ew_StartTiming(L"transform", L"cpu");
+    for (int i = 0; i < 5; i++) {
+        ew_StartTiming(L"render_row", L"cpu"); Sleep(12); ew_EndTiming(L"render_row", &elapsed_ms);
+    }
+    ew_EndTiming(L"transform", &elapsed_ms);
+    ew_StartTiming(L"write_file", L"io"); Sleep(20);
+    ew_StartTiming(L"flush", L"io"); Sleep(15); ew_EndTiming(L"flush", &elapsed_ms);
+    ew_EndTiming(L"write_file", &elapsed_ms);
+    double trace_total = 0.0;
+    ew_EndTrace(&trace_total);
+    wprintf(L"Trace finished in %.1f ms\n", trace_total);
+
     // 6. Metrics: counter (monotonic) + gauge (point-in-time).
     ew_IncrementCounter(L"reports.generated", 1.0, L"reports");
     ew_RecordGauge     (L"queue.depth",       3.0, L"reports");

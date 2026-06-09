@@ -140,6 +140,13 @@ type
     [MVCHTTPMethod([httpGET])]
     [MVCProduces(TMVCMediaType.APPLICATION_JSON)]
     function HealthCheck: String;
+
+    // --- Nested Timing Trace demo ---
+
+    [MVCPath('/trace-demo')]
+    [MVCHTTPMethod([httpGET])]
+    [MVCProduces(TMVCMediaType.TEXT_HTML)]
+    function TraceDemo: String;
   end;
 
 implementation
@@ -875,6 +882,72 @@ begin
   finally
     LJSON.Free;
   end;
+end;
+
+
+// ---------------------------------------------------------------------------
+//  Nested Timing Trace demo
+// ---------------------------------------------------------------------------
+//
+//  GET /web/trace-demo  ->  produces a profiler-style "waterfall" of one
+//  request's work in ExeWatch.
+//
+//  EW.StartTrace opens a named ROOT trace and returns a 16-hex trace id.
+//  Every EW.StartTiming / EW.EndTiming executed before EW.EndTrace auto-nests
+//  under it via the SDK's per-thread LIFO stack. Because a single DMVCFramework
+//  action runs entirely on the request thread, the whole tree is captured in
+//  order: ValidateRequest, then QueryDatabase (with OpenConnection + RunQuery
+//  as its children), then SerializeJson — exactly the shape shown on the
+//  dashboard waterfall. EndTrace must run on every path (success and error),
+//  hence the try/except that re-raises after closing the trace.
+//
+function TWebController.TraceDemo: String;
+var
+  LTraceId: string;
+  LTotalMs: Double;
+begin
+  EW.AddBreadcrumb('Trace demo request', 'trace');
+
+  LTraceId := EW.StartTrace('HandleTraceDemo');
+  try
+    EW.StartTiming('ValidateRequest', 'http');
+    Sleep(5);
+    EW.EndTiming('ValidateRequest', nil, True);
+
+    EW.StartTiming('QueryDatabase', 'db');
+    EW.StartTiming('OpenConnection', 'db');
+    Sleep(10);
+    EW.EndTiming('OpenConnection', nil, True);
+    EW.StartTiming('RunQuery', 'db');
+    Sleep(20);
+    EW.EndTiming('RunQuery', nil, True);
+    EW.EndTiming('QueryDatabase', nil, True);
+
+    EW.StartTiming('SerializeJson', 'cpu');
+    Sleep(8);
+    EW.EndTiming('SerializeJson', nil, True);
+
+    LTotalMs := EW.EndTrace;
+  except
+    on E: Exception do
+    begin
+      EW.EndTrace;
+      raise;
+    end;
+  end;
+
+  EW.Info(Format('Trace "HandleTraceDemo" completed (id %s) in ~%.0f ms',
+    [LTraceId, LTotalMs]), 'trace');
+
+  Result := Format(
+    '<div class="alert alert-success">' +
+    '<strong>Nested trace recorded</strong><br>' +
+    'Trace id <code>%s</code> &mdash; total ~%.0f ms.<br>' +
+    'Spans: ValidateRequest &rarr; QueryDatabase (OpenConnection, RunQuery) ' +
+    '&rarr; SerializeJson.<br>' +
+    '<small class="text-muted">Open the Timing / Traces page in ExeWatch to ' +
+    'see the profiler-style waterfall for this request.</small></div>',
+    [LTraceId, LTotalMs]);
 end;
 
 end.

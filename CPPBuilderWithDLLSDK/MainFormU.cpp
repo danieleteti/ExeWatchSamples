@@ -491,6 +491,59 @@ void __fastcall TMainForm::btnConcurrentTimingsClick(TObject *Sender)
 }
 
 //---------------------------------------------------------------------------
+// NESTED TRACE -- profiler-style tree of nested timings, over the DLL.
+//
+// ew_StartTrace opens a named root and fills a caller buffer with the 16-hex
+// trace id; every StartTiming/EndTiming until ew_EndTrace nests as a child
+// span. The 'RenderRow' loop reuses one id, so the dashboard merges those
+// siblings into a single node (count + avg/min/max), just like a real
+// profiler call tree. Old flat ew_StartTiming usage above is unaffected --
+// the trace API is purely additive.
+//---------------------------------------------------------------------------
+void __fastcall TMainForm::btnNestedTraceClick(TObject *Sender)
+{
+	Log("-- Nested Trace demo (profiler-style tree via DLL) --");
+
+	wchar_t traceId[64] = {0};
+	ew_StartTrace(L"GenerateInvoiceReport", traceId, 64);
+	Log(String("Trace started: GenerateInvoiceReport (") + traceId + ")");
+
+	double elapsed;
+	try
+	{
+		ew_StartTiming(L"LoadCustomers", L"db");
+		Sleep(40);
+		ew_EndTiming(L"LoadCustomers", &elapsed);
+
+		ew_StartTiming(L"Transform", L"cpu");
+		for (int i = 0; i < 5; i++)
+		{
+			ew_StartTiming(L"RenderRow", L"cpu");
+			Sleep(10 + Random(15));
+			ew_EndTiming(L"RenderRow", &elapsed);
+		}
+		ew_EndTiming(L"Transform", &elapsed);
+
+		ew_StartTiming(L"WriteFile", L"io");
+		Sleep(20);
+		ew_StartTiming(L"Flush", L"io");
+		Sleep(15);
+		ew_EndTiming(L"Flush", &elapsed);
+		ew_EndTiming(L"WriteFile", &elapsed);
+
+		double total = 0.0;
+		ew_EndTrace(&total);
+		Log("Trace finished in " + FormatFloat("0", total) + " ms.");
+	}
+	catch (Exception &E)
+	{
+		double total = 0.0;
+		ew_EndTrace(&total);  // always close the trace, even on failure
+		Log("Trace failed: " + E.Message);
+	}
+}
+
+//---------------------------------------------------------------------------
 // CLEAR LOG
 //---------------------------------------------------------------------------
 void __fastcall TMainForm::btnClearLogClick(TObject *Sender)

@@ -203,6 +203,7 @@
     <p>Measure a simulated async operation (300 &ndash; 1500 ms).</p>
     <div class="btn-row">
       <button class="btn-action" onclick="testTiming()">Start Timing Test</button>
+      <button class="btn-action" onclick="runNestedTraceDemo()">Nested Trace (profiler tree)</button>
     </div>
   </div>
 
@@ -359,6 +360,55 @@
         ew.endTiming('simulated_operation');
         log('action', 'Timing ended &mdash; ' + duration + ' ms reported to ExeWatch');
       }, duration);
+    }
+
+    // ── NESTED TRACE (profiler tree) ──────────────────────────────────
+    // A trace groups a series of timings into a parent/child span tree —
+    // exactly like a profiler flame graph or waterfall.
+    //   ew.startTrace(name)  — open a named ROOT trace, returns a 16-hex id
+    //   ew.endTrace()        — close the active trace, returns total ms (-1 if none)
+    // Between start/end, ordinary startTiming/endTiming calls automatically
+    // NEST as child spans (LIFO — last opened is the first closed). Reusing the
+    // same timing name inside a loop merges into ONE node on the dashboard
+    // waterfall, with call count + aggregated time.
+    //
+    // Flat startTiming/endTiming WITHOUT a surrounding trace keeps working
+    // exactly as before (see "Start Timing Test") — traces are purely additive.
+
+    // Small async delay helper (browser-friendly; no blocking sleeps).
+    var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+
+    async function runNestedTraceDemo() {
+      // Open the root trace. Everything timed until endTrace() nests under it.
+      var traceId = ew.startTrace('GenerateInvoiceReport');
+      log('action', 'Trace started &mdash; GenerateInvoiceReport (id ' + traceId + ')');
+
+      // Child span: a simulated DB read.
+      ew.startTiming('LoadCustomers', 'db');
+      await sleep(40);
+      ew.endTiming('LoadCustomers');
+
+      // Child span with its own nested children: a transform that renders rows.
+      ew.startTiming('Transform', 'cpu');
+      for (var i = 0; i < 5; i++) {
+        // Reusing 'RenderRow' merges these 5 iterations into a single node.
+        ew.startTiming('RenderRow', 'cpu');
+        await sleep(10);
+        ew.endTiming('RenderRow');
+      }
+      ew.endTiming('Transform');
+
+      // Child span with a grandchild: writing the file, flushing inside it.
+      ew.startTiming('WriteFile', 'io');
+      await sleep(20);
+      ew.startTiming('Flush', 'io');
+      await sleep(15);
+      ew.endTiming('Flush');
+      ew.endTiming('WriteFile');
+
+      // Close the trace — returns the total wall time of the root in ms.
+      var total = ew.endTrace();
+      log('action', 'Trace ended &mdash; ' + total + ' ms total. Open the dashboard waterfall to see the span tree.');
     }
 
     // ── BREADCRUMBS + ERROR ───────────────────────────────────────────

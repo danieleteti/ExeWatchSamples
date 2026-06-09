@@ -59,6 +59,7 @@ type
     Label1: TLabel;
     btnIncrementCounter2: TButton;
     btnCounter3: TButton;
+    btnNestedTrace: TButton;
     tmrPeriodicGauge: TTimer;
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
@@ -79,6 +80,7 @@ type
     procedure btnSingleTimingClick(Sender: TObject);
     procedure btnIncrementCounter2Click(Sender: TObject);
     procedure btnCounter3Click(Sender: TObject);
+    procedure btnNestedTraceClick(Sender: TObject);
     procedure tmrPeriodicGaugeTimer(Sender: TObject);
   private
     procedure Log(const AMessage: string);
@@ -341,6 +343,57 @@ begin
       ew_EndTiming(PWideChar(EWStr('Billing')), ElapsedMs);
       Log('Failed');
       raise;
+    end;
+  end;
+end;
+
+{ ============================================================================
+  NESTED TRACE — profiler-style tree of nested timings, over the DLL.
+
+  EWStartTrace opens a named root and returns the 16-hex trace id (the DLL
+  fills a caller buffer). Every StartTiming/EndTiming pair until EWEndTrace
+  nests as a child span. The 'RenderRow' loop reuses one id, so the dashboard
+  merges those siblings into a single node with count + avg/min/max — exactly
+  like a real profiler call tree. Open the log list and click the trace badge
+  to see the waterfall. (Old flat StartTiming/EndTiming usage is unaffected.)
+  ============================================================================ }
+procedure TMainForm.btnNestedTraceClick(Sender: TObject);
+var
+  TraceId: string;
+  ElapsedMs: Double;
+  I: Integer;
+begin
+  Log('-- Nested Trace demo (profiler-style tree via DLL) --');
+  TraceId := EWStartTrace('GenerateInvoiceReport');
+  Log('Trace started: GenerateInvoiceReport (' + TraceId + ')');
+  try
+    EWStartTiming('LoadCustomers', 'db');
+    Sleep(40);
+    EWEndTiming('LoadCustomers', ElapsedMs);
+
+    EWStartTiming('Transform', 'cpu');
+    for I := 1 to 5 do
+    begin
+      EWStartTiming('RenderRow', 'cpu');
+      Sleep(10 + Random(15));
+      EWEndTiming('RenderRow', ElapsedMs);
+    end;
+    EWEndTiming('Transform', ElapsedMs);
+
+    EWStartTiming('WriteFile', 'io');
+    Sleep(20);
+    EWStartTiming('Flush', 'io');
+    Sleep(15);
+    EWEndTiming('Flush', ElapsedMs);
+    EWEndTiming('WriteFile', ElapsedMs);
+
+    EWEndTrace(ElapsedMs);  // closes the root and ships the whole tree
+    Log(Format('Trace finished in %.0f ms.', [ElapsedMs]));
+  except
+    on E: Exception do
+    begin
+      EWEndTrace(ElapsedMs);  // always close the trace, even on failure
+      Log('Trace failed: ' + E.Message);
     end;
   end;
 end;

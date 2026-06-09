@@ -53,6 +53,7 @@ type
     lstModules: TListBox;
     btnShowForm: TButton;
     btnUnloadAll: TButton;
+    btnNestedTrace: TButton;
     pnlBottom: TPanel;
     lblLogOutput: TLabel;
     memoLog: TMemo;
@@ -64,6 +65,7 @@ type
     procedure btnLoadOrdersClick(Sender: TObject);
     procedure btnShowFormClick(Sender: TObject);
     procedure btnUnloadAllClick(Sender: TObject);
+    procedure btnNestedTraceClick(Sender: TObject);
     procedure btnClearLogClick(Sender: TObject);
     procedure lstModulesDblClick(Sender: TObject);
   private
@@ -331,6 +333,72 @@ begin
   ClearModuleRegistry;
   RefreshModuleList;
   UpdateUI;
+end;
+
+{ ============================================================================
+  NESTED TRACE — profiler-style tree of nested timings.
+
+  StartTrace opens a NAMED ROOT. Every EW.StartTiming/EndTiming you call before
+  EW.EndTrace nests UNDER it (on the same thread), so the dashboard shows the
+  whole operation as a waterfall: which sub-step took the time, and how often a
+  step ran. A loop reusing the same id is merged into ONE node with a count.
+
+  Requires an active ExeWatch session — click Connect first.
+  ============================================================================ }
+procedure TMainForm.btnNestedTraceClick(Sender: TObject);
+var
+  TraceId: string;
+  Total: Double;
+  I: Integer;
+begin
+  if not ExeWatchIsInitialized then
+  begin
+    UILog('[SKIP] Connect to ExeWatch first, then run the Nested Trace demo');
+    Exit;
+  end;
+
+  UILog('-- Nested Trace demo (profiler-style tree) --');
+
+  // Open the named root. Returns the trace id (handy for correlation/logging).
+  TraceId := EW.StartTrace('GenerateInvoiceReport');
+  UILog('Trace started: GenerateInvoiceReport (' + TraceId + ')');
+  try
+    // Step 1 — a child span.
+    EW.StartTiming('LoadCustomers', 'db');
+    Sleep(40);
+    EW.EndTiming('LoadCustomers');
+
+    // Step 2 — a loop. The same 'RenderRow' id runs many times; the dashboard
+    // merges these siblings into ONE node showing the count + avg/min/max,
+    // exactly like a real profiler call tree.
+    EW.StartTiming('Transform', 'cpu');
+    for I := 1 to 5 do
+    begin
+      EW.StartTiming('RenderRow', 'cpu');
+      Sleep(10 + Random(15));
+      EW.EndTiming('RenderRow');
+    end;
+    EW.EndTiming('Transform');
+
+    // Step 3 — a grandchild (Flush nested inside WriteFile) to show real depth.
+    EW.StartTiming('WriteFile', 'io');
+    Sleep(20);
+    EW.StartTiming('Flush', 'io');
+    Sleep(15);
+    EW.EndTiming('Flush');
+    EW.EndTiming('WriteFile');
+
+    Total := EW.EndTrace;  // closes the root and ships the whole tree
+    UILog(Format('Trace finished in %.0f ms.', [Total]));
+    UILog('Open the dashboard log list and click the "GenerateInvoiceReport"');
+    UILog('trace badge to see the waterfall (RenderRow appears once, with x5).');
+  except
+    on E: Exception do
+    begin
+      EW.EndTrace;  // always close the trace, even on failure
+      UILog('Trace failed: ' + E.Message);
+    end;
+  end;
 end;
 
 procedure TMainForm.btnClearLogClick(Sender: TObject);

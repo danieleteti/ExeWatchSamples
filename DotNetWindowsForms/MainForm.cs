@@ -256,6 +256,35 @@ public partial class MainForm : Form
         UILog("Nested timing test complete");
     }
 
+    private void BtnTimingTrace_Click(object? sender, EventArgs e)
+    {
+        if (!ExeWatchSdk.IsInitialized) return;
+
+        // Nested timing trace (waterfall profiler).
+        // StartTrace opens a trace; every StartTiming/EndTiming between
+        // StartTrace and EndTrace nests as a child span (per-thread LIFO).
+        // The dashboard renders the result as a waterfall, so you can see
+        // exactly where time is spent. The RenderRow loop reuses one timing
+        // id, so those iterations merge into a single aggregated node.
+        UILog("--- Nested Timing Trace ---");
+        EW.StartTrace("GenerateInvoiceReport");
+        UILog("Started trace \"GenerateInvoiceReport\"");
+
+        EW.StartTiming("LoadCustomers", "db"); Thread.Sleep(40); EW.EndTiming("LoadCustomers");
+
+        EW.StartTiming("Transform", "cpu");
+        for (int i = 0; i < 5; i++) { EW.StartTiming("RenderRow", "cpu"); Thread.Sleep(10); EW.EndTiming("RenderRow"); }
+        EW.EndTiming("Transform");
+
+        EW.StartTiming("WriteFile", "io"); Thread.Sleep(20);
+        EW.StartTiming("Flush", "io"); Thread.Sleep(15); EW.EndTiming("Flush");
+        EW.EndTiming("WriteFile");
+
+        double traceMs = EW.EndTrace();
+        UILog($"Ended trace: {traceMs:F2}ms total");
+        UILog("Open the Timing page and click the trace root for the waterfall view");
+    }
+
     private void BtnTimingParallel_Click(object? sender, EventArgs e)
     {
         if (!ExeWatchSdk.IsInitialized) return;
@@ -421,6 +450,10 @@ public partial class MainForm : Form
         UILog("");
 
         BtnTimingNested_Click(null, EventArgs.Empty);
+        Thread.Sleep(100);
+        UILog("");
+
+        BtnTimingTrace_Click(null, EventArgs.Empty);
         Thread.Sleep(100);
         UILog("");
 

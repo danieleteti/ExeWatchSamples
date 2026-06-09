@@ -24,6 +24,11 @@ type
     [MVCHTTPMethod([httpPOST])]
     [MVCDoc('Receives ExeWatch alert webhook notifications')]
     function HandleWebHook([MVCFromBody] Payload: TJSONObject): IMVCResponse;
+
+    [MVCPath('/trace-demo')]
+    [MVCHTTPMethod([httpGET])]
+    [MVCDoc('Emits a nested timing trace (profiler-style waterfall) to ExeWatch')]
+    function TraceDemo: IMVCResponse;
   end;
 
 const
@@ -33,7 +38,7 @@ const
 implementation
 
 uses
-  System.SysUtils, MVCFramework.Logger;
+  System.SysUtils, MVCFramework.Logger, ExeWatchSDKv1;
 
 function TExeWatchWebHookController.HandleWebHook(Payload: TJSONObject): IMVCResponse;
 var
@@ -94,6 +99,65 @@ begin
 
   // 6. Return 200 to acknowledge receipt
   Result := OKResponse('Webhook received');
+end;
+
+// ---------------------------------------------------------------------------
+//  GET /api/trace-demo  ->  Nested Timing Trace demo
+// ---------------------------------------------------------------------------
+//
+//  Produces a profiler-style "waterfall" of one request's work in ExeWatch.
+//  EW.StartTrace opens a named ROOT trace and returns a 16-hex trace id; every
+//  EW.StartTiming / EW.EndTiming run before EW.EndTrace auto-nests under it via
+//  the SDK's per-thread LIFO stack. A DMVCFramework action runs entirely on the
+//  request thread, so the whole tree is captured in order: ValidateRequest,
+//  then QueryDatabase (with OpenConnection + RunQuery as children), then
+//  SerializeJson. EndTrace must run on every path (success and error), hence the
+//  try/except that re-raises after closing the trace. This is purely additive:
+//  the existing /api/webhook endpoint is unchanged.
+//
+function TExeWatchWebHookController.TraceDemo: IMVCResponse;
+var
+  LTraceId: string;
+  LTotalMs: Double;
+begin
+  EW.AddBreadcrumb('Trace demo request', 'trace');
+
+  LTraceId := EW.StartTrace('HandleTraceDemo');
+  try
+    EW.StartTiming('ValidateRequest', 'http');
+    Sleep(5);
+    EW.EndTiming('ValidateRequest', nil, True);
+
+    EW.StartTiming('QueryDatabase', 'db');
+    EW.StartTiming('OpenConnection', 'db');
+    Sleep(10);
+    EW.EndTiming('OpenConnection', nil, True);
+    EW.StartTiming('RunQuery', 'db');
+    Sleep(20);
+    EW.EndTiming('RunQuery', nil, True);
+    EW.EndTiming('QueryDatabase', nil, True);
+
+    EW.StartTiming('SerializeJson', 'cpu');
+    Sleep(8);
+    EW.EndTiming('SerializeJson', nil, True);
+
+    LTotalMs := EW.EndTrace;
+  except
+    on E: Exception do
+    begin
+      EW.EndTrace;
+      raise;
+    end;
+  end;
+
+  EW.Info(Format('Trace "HandleTraceDemo" completed (id %s) in ~%.0f ms',
+    [LTraceId, LTotalMs]), 'trace');
+
+  Result := OKResponse(Format(
+    'Nested trace recorded. id=%s total~%.0fms. ' +
+    'Spans: ValidateRequest -> QueryDatabase (OpenConnection, RunQuery) -> SerializeJson. ' +
+    'Open the Timing / Traces page in ExeWatch to see the waterfall.',
+    [LTraceId, LTotalMs]));
 end;
 
 end.
