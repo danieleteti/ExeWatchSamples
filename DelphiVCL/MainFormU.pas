@@ -78,6 +78,7 @@ type
   private
     procedure Log(const AMessage: string);
     procedure OnEWError(const ErrorMessage: string);
+    procedure OnEWLogSent(AAcceptedCount, ARejectedCount: Integer);
   end;
 
 var
@@ -180,6 +181,8 @@ begin
   // Useful for debugging integration issues. You can safely omit this in production.
   EW.OnError := OnEWError;
 
+  EW.OnLogsSent := OnEWLogSent;
+
   // OPTIONAL — Attach custom key-value pairs to the device info sent to ExeWatch.
   // Use this to tag the environment, build variant, feature flags, etc.
   // Call SetCustomDeviceInfo() as many times as needed, then SendCustomDeviceInfo()
@@ -219,6 +222,11 @@ end;
 procedure TMainForm.OnEWError(const ErrorMessage: string);
 begin
   Log('SDK ERROR: ' + ErrorMessage);
+end;
+
+procedure TMainForm.OnEWLogSent(AAcceptedCount, ARejectedCount: Integer);
+begin
+  Log('Events sent --> Accepted: ' + AAcceptedCount.ToString + ' - Rejected: ' + ARejectedCount.ToString);
 end;
 
 { ============================================================================
@@ -310,7 +318,7 @@ begin
       begin
         EW.EndTiming(TimingID, nil, False);
         Log('Failed');
-//        raise;
+        raise;
       end;
     end;
   end;
