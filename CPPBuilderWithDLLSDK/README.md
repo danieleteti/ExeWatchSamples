@@ -71,6 +71,30 @@ missing — useful for graceful degradation.
 - **Graceful missing-DLL behaviour**: the app keeps running; you decide
   how to surface the error.
 
+## Stack traces are the host's job
+
+Automatic, native stack-trace capture only happens in the SDKs that hook the host
+runtime directly: the **Delphi Native SDK**, the **.NET SDK**, the **Python SDK** and the
+**JavaScript SDK**. The **DLL SDK does not** — it runs as a plain library inside your
+C++Builder app and cannot hook the C++ runtime.
+
+So in this sample (and any C++Builder host) **you** capture the stack and pass it to
+ExeWatch via `ew_ErrorWithStackTrace`:
+
+```cpp
+void __fastcall TMainForm::OnAppException(TObject *Sender, Exception *E)
+{
+    // Build a symbolic stack with JclDebug or madExcept (needs debug info:
+    // Detailed MAP / TD32). Without one, pass NULL -> only class + message, no frames.
+    ew_ErrorWithStackTrace(E->Message.c_str(), L"exception",
+                           /* stackTrace */ NULL,
+                           E->ClassName().c_str());
+}
+```
+
+Passing `NULL` for the stack still logs the exception class and message; for readable
+frames the host must generate the stack (JclDebug / madExcept) and pass the string.
+
 ## Full docs
 
 - Dashboard: https://exewatch.com
