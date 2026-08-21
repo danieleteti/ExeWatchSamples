@@ -1,4 +1,4 @@
-{ *******************************************************************************
+﻿{ *******************************************************************************
   ExeWatch VCL Sample Application
 
   This demo shows how to use every feature of the ExeWatch Delphi SDK.
@@ -6,7 +6,8 @@
   understand what is REQUIRED vs OPTIONAL in your own application.
 
   Quick start:
-    1. Replace the API key in FormCreate with your own (from https://exewatch.com)
+    1. Put your API key (from https://exewatch.com) in a file named .env next
+       to the executable: exewatch.api.key=ew_win_your_key_here
     2. Build and run (F9)
     3. Click the buttons and watch events appear in the ExeWatch dashboard
 
@@ -90,8 +91,53 @@ uses
   ExeWatchSDKv1;
 
 const
-  // Replace with your actual API key from the ExeWatch dashboard
-  EXEWATCH_API_KEY = 'ew_win_YOUR_API_KEY_HERE';
+  // The key lives in a file named .env next to the executable, never in this
+  // source. This repository is public, and a key typed into a source file is a
+  // key that eventually gets committed; the output folder is gitignored, so a
+  // key put there cannot reach a commit.
+  API_KEY_SETTING = 'exewatch.api.key';
+
+/// <summary>
+///   Reads one setting from the .env file beside the executable. Deliberately
+///   tiny: key=value, blank lines and lines starting with # ignored.
+/// </summary>
+function EnvSetting(const AName: string): string;
+var
+  Lines: TStringList;
+  I, SepPos: Integer;
+  Line, Key: string;
+  EnvFile: string;
+begin
+  Result := '';
+  EnvFile := ExtractFilePath(ParamStr(0)) + '.env';
+  if not FileExists(EnvFile) then
+    Exit;
+  Lines := TStringList.Create;
+  try
+    try
+      Lines.LoadFromFile(EnvFile);
+    except
+      Exit;
+    end;
+    for I := 0 to Lines.Count - 1 do
+    begin
+      Line := Trim(Lines[I]);
+      if (Line = '') or (Line[1] = '#') then
+        Continue;
+      SepPos := Pos('=', Line);
+      if SepPos <= 1 then
+        Continue;
+      Key := Trim(Copy(Line, 1, SepPos - 1));
+      if SameText(Key, AName) then
+      begin
+        Result := Trim(Copy(Line, SepPos + 1, Length(Line)));
+        Exit;
+      end;
+    end;
+  finally
+    Lines.Free;
+  end;
+end;
 
 {$R *.dfm}
 
@@ -154,6 +200,8 @@ end;
     - buffering logs to disk and shipping them in the background
   ============================================================================ }
 procedure TMainForm.FormCreate(Sender: TObject);
+var
+  ApiKey: string;
 begin
   Randomize;
   Constraints.MaxWidth := Width;
@@ -161,21 +209,22 @@ begin
   Caption := Caption + ' - ExeWatch SDK ' + EXEWATCH_SDK_VERSION;
 
   // ---------------------------------------------------------------
-  // REQUIRED — Replace with your API key from https://exewatch.com
+  // REQUIRED — your API key from https://exewatch.com, in bin\.env
   // ---------------------------------------------------------------
-  if EXEWATCH_API_KEY = 'ew_win_xxxxxx_USE_YOUR_OWN_KEY' then
+  ApiKey := EnvSetting(API_KEY_SETTING);
+  if ApiKey = '' then
   begin
     ShowMessage(
       'API Key Not Configured' + sLineBreak + sLineBreak +
-      'You must set your API key before running this sample.' + sLineBreak +
-      'Open MainFormU.pas, find the EXEWATCH_API_KEY constant and replace' + sLineBreak +
-      '"ew_win_xxxxxx_USE_YOUR_OWN_KEY" with your actual API key.' + sLineBreak + sLineBreak +
+      'Create a file named .env next to this executable, containing:' + sLineBreak + sLineBreak +
+      '    ' + API_KEY_SETTING + '=ew_win_your_key_here' + sLineBreak + sLineBreak +
+      'That folder is gitignored, so the key stays out of the repository.' + sLineBreak +
       'Get your API key from: https://exewatch.com');
     Application.Terminate;
     Exit;
   end;
 
-  InitializeExeWatch(EXEWATCH_API_KEY, 'SampleCustomer');
+  InitializeExeWatch(ApiKey, 'SampleCustomer');
 
   // OPTIONAL — Get notified when the SDK encounters an error (e.g. network failure).
   // Useful for debugging integration issues. You can safely omit this in production.

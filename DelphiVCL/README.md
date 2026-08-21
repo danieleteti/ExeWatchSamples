@@ -10,7 +10,13 @@ A Windows desktop application that demonstrates logging, timing, and exception c
 
 **Step 1** — Open `EWDelphiVCL.dproj` in the Delphi IDE.
 
-**Step 2** — Open `MainFormU.pas` and replace the `EXEWATCH_API_KEY` constant with your own API key (from [exewatch.com](https://exewatch.com)).
+**Step 2** — Copy `.env.example` to `bin\.env` and put your own API key in it (from [exewatch.com](https://exewatch.com)):
+
+```
+exewatch.api.key=ew_win_your_key_here
+```
+
+The key deliberately does not live in the source. `bin\` is gitignored, so a key put there cannot reach a commit, and this repository is public.
 
 **Step 3** — Build and run (F9).
 

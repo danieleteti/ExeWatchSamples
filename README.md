@@ -42,6 +42,7 @@ This is enough for personal projects and small commercial applications. Sign up 
 | [Delphi Android](DelphiAndroid/) | FMX application targeting **Android** specifically. Narrow scrollable UI built programmatically; exercises every SDK entry point (logs, exceptions, breadcrumbs, timings, identity, tags, customer id, device info, metrics, background-thread usage, flush) so you can tap through the full API on a phone or emulator. | [README](DelphiAndroid/README.md) |
 | [Delphi WebBroker](DelphiWebBroker/) | REST API server that wraps every HTTP request with ExeWatch timing, error tracking, and request counters. 6 demo endpoints included. | [README](DelphiWebBroker/README.md) |
 | [Delphi DMVCFramework](DelphiDMVCFramework/) | Full web app with TemplatePro + HTMX. People CRUD, heavy reports with nested timings, simulated external services with realistic failures, batch imports with structured extra data, breadcrumb trails, counters, and periodic gauges. The most complete server-side sample. | [README](DelphiDMVCFramework/README.md) |
+| [Delphi Multi-Tenant Server](DelphiSDKSingleProcessMultiTenant/) | DMVCFramework API serving three tenants from one process with one API key: one `TExeWatch` per tenant, a middleware that resolves the tenant per request, one queue folder per instance and tenant. Answers how a stateless server logs each request against the right customer. | [README](DelphiSDKSingleProcessMultiTenant/README.md) |
 
 **Requirements:** Embarcadero Delphi 11+ (DMVCFramework sample also requires [DMVCFramework](https://github.com/danieleteti/delphimvcframework))
 
@@ -83,6 +84,7 @@ The API is intentionally similar across all SDKs:
 | Scenario | Question |
 |----------|----------|
 | [InitialCustomDeviceInfo](SpecificScenarios/InitialCustomDeviceInfo/) | How do I attach tags and environment info (RDP, Terminal Server, desktop mode) to the first log event and device info at startup? |
+| [Single Process, Multi-Tenant](DelphiSDKSingleProcessMultiTenant/) | My server serves several customers from one process, on pooled threads. How do I log each request against the right one, and how do I keep ten copies of the server from fighting over the same queue? |
 
 See the [SpecificScenarios README](SpecificScenarios/README.md) for the full list.
 

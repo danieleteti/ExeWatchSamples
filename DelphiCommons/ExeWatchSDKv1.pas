@@ -46,7 +46,7 @@ uses
   System.Diagnostics;  // For TStopwatch (high-precision timing)
 
 const
-  EXEWATCH_SDK_VERSION = '0.22.1';
+  EXEWATCH_SDK_VERSION = '0.23.0';
   EXEWATCH_API_VERSION = 'v1';  // API version this SDK targets
   {$IF NOT DEFINED(LOCAL_EXEWATCH)}
   EXEWATCH_ENDPOINT = 'https://exewatch.com';
@@ -229,6 +229,13 @@ type
     TotalBytes: Int64;
     FreeBytes: Int64;
     DriveType: string;      // "Fixed", "Removable", "Network", "CDRom", "RamDisk"
+    /// <summary>
+    ///   1 = solid state, 0 = it spins, -1 = the device did not say.
+    ///   DriveType cannot tell the two apart: an NVMe and a 2011 platter drive
+    ///   both report "Fixed", and a drive that spins is the single most common
+    ///   answer to "why is this machine slow".
+    /// </summary>
+    IsSSD: Integer;
     function ToJSON: TJSONObject;
   end;
 
@@ -264,6 +271,34 @@ type
     CPUCores: Integer;
     CPULogicalProcessors: Integer;
     CPUArchitecture: string;
+    /// <summary>
+    ///   Nominal clock, the figure a spec sheet prints. Not the boost clock,
+    ///   and not what the CPU happens to be doing right now: neither is a
+    ///   stable property of the machine. 0 when unknown.
+    /// </summary>
+    CPUMaxMhz: Integer;
+    /// <summary>
+    ///   Nominal clock of the slowest core class. On a hybrid CPU the efficiency
+    ///   cores sit well below the package figure, and single-threaded work that
+    ///   lands on one is slower for a reason no other field shows. 0 when
+    ///   unknown. This is a specification, not a throttle: see CPUThrottleMaxPct.
+    /// </summary>
+    CPUMinCoreMhz: Integer;
+    /// <summary>
+    ///   Ceiling the active power plan puts on the processor, as a percentage.
+    ///   A machine held at 30% is slow for a reason no hardware figure shows.
+    ///   -1 when unknown.
+    /// </summary>
+    CPUThrottleMaxPct: Integer;
+    /// <summary>"ac", "battery", or empty when unknown.</summary>
+    PowerSource: string;
+    /// <summary>
+    ///   1 = running inside a remote desktop / terminal server session,
+    ///   0 = local console, -1 = unknown. A GUI application over RDP is slow
+    ///   for reasons that have nothing to do with the machine's specification,
+    ///   so this changes where you look before it changes what you conclude.
+    /// </summary>
+    RemoteSession: Integer;
     // Disks
     Disks: TArray<TDiskInfo>;
     // Monitors
@@ -789,10 +824,21 @@ procedure ExeWatchRegisterFrameworkHook;
 // Internal: used by ExeWatchSDKv1.VCL/FMX hooks — not part of the public API
 function GetStackTraceStr(FramesToSkip: Integer = 0): string;
 function GetNoStackTraceReason: Integer;
-function GetLastExceptionStackTrace(E: Exception = nil): string;
+// The trace lives on the exception object, so the caller must say which
+// exception it is asking about. No default: a nil argument can only ever
+// return an empty string, and the compiler should say so.
+function GetLastExceptionStackTrace(E: Exception): string;
 
 {$IFDEF EXEWATCH_TESTING}
 function EWGetStackTraceStr(FramesToSkip: Integer = 0): string;
+{$IFDEF LINUX}
+/// <summary>
+///   Exposed for the test project only. /sys and /proc files report a size of
+///   zero and break the RTL readers, so this one has to be proven to work
+///   against a real virtual file rather than trusted.
+/// </summary>
+function EWTestReadSysInt(const APath: string; out AValue: Int64): Boolean;
+{$ENDIF}
 {$ENDIF}
 
 implementation
@@ -805,6 +851,7 @@ uses
 {$ENDIF}
 {$IFDEF LINUX}
   Posix.Base,
+  Posix.Fcntl,
   Posix.Unistd,
   Posix.Pwd,
 {$ENDIF}
@@ -927,26 +974,103 @@ var
 threadvar
   GMyBreadcrumbGen: Int64; // unique generation for current thread (0 = not assigned yet)
   GMyTimingGen: Int64;     // unique generation for current thread's timing dict
-  GLastExceptionStackTrace: string; // stack trace captured at raise time (for VCL/FMX hook)
-  GExceptionHookNesting: Integer; // prevent re-entry during stack capture
 
 
 {$IFDEF MSWINDOWS}
+// The stack must be captured at raise time, before SEH unwinding destroys the
+// frames, but it is only read later, by the VCL/FMX hooks. It therefore has to
+// survive between the two, and it is held on the exception object: Delphi calls
+// CleanUpStackInfoProc from Exception.Destroy, so the trace dies with the
+// exception that owns it.
+//
+// It used to be parked in a threadvar instead, which had two consequences.
+// Delphi does not finalize managed threadvars when a thread ends, so every
+// thread that raised a handled exception leaked its trace string for the life
+// of the process. And since nothing consumed the value outside a GUI app, the
+// next exception on that thread was handed the previous one's stack.
+type
+  PEWStackInfo = ^TEWStackInfo;
+  TEWStackInfo = record
+    Signature: NativeUInt; // proves the block came from here, see EWStackInfoOf
+    Trace: string;
+    Inner: Pointer;        // whatever the previously installed provider returned
+  end;
+
+const
+  EW_STACKINFO_SIGNATURE = NativeUInt($45575354); // 'EWST'
+
 var
   GOldGetExceptionStackInfoProc: function(P: System.PExceptionRecord): Pointer = nil;
+  GOldGetStackInfoStringProc: function(Info: Pointer): string = nil;
+  GOldCleanUpStackInfoProc: procedure(Info: Pointer) = nil;
 
-function ExeWatchGetExceptionStackInfo(P: System.PExceptionRecord): Pointer;
+// Returns Info as ours, or nil when it belongs to another stack-trace provider
+// that installed itself after us (madExcept and friends).
+function EWStackInfoOf(Info: Pointer): PEWStackInfo;
 begin
-  if Assigned(GOldGetExceptionStackInfoProc) then
-    Result := GOldGetExceptionStackInfoProc(P)
+  if (Info <> nil) and (PEWStackInfo(Info)^.Signature = EW_STACKINFO_SIGNATURE) then
+    Result := PEWStackInfo(Info)
   else
     Result := nil;
+end;
 
-  // Capture stack at raise time — called BEFORE SEH unwinding.
-  // Only capture if not already set — the first raise (user's) is the one we want.
-  // GetLastExceptionStackTrace clears it after consumption, allowing next capture.
-  if GLastExceptionStackTrace = '' then
-    GLastExceptionStackTrace := GetStackTraceStr(0);
+function ExeWatchGetExceptionStackInfo(P: System.PExceptionRecord): Pointer;
+var
+  Info: PEWStackInfo;
+begin
+  New(Info);
+  Info^.Signature := EW_STACKINFO_SIGNATURE;
+  Info^.Inner := nil;
+  try
+    Info^.Trace := GetStackTraceStr(0);
+    if Assigned(GOldGetExceptionStackInfoProc) then
+      Info^.Inner := GOldGetExceptionStackInfoProc(P);
+  except
+    // This runs while an exception is being raised. Letting a second one out
+    // of here would recurse through the same hook, so a failed capture costs
+    // the trace and nothing else.
+  end;
+  Result := Info;
+end;
+
+// E.StackTrace goes through here. Whoever was providing the text before us
+// keeps providing it, so installing the SDK does not change what an existing
+// stack-trace library prints.
+function ExeWatchGetStackInfoString(Info: Pointer): string;
+var
+  Ours: PEWStackInfo;
+begin
+  Ours := EWStackInfoOf(Info);
+  if Ours = nil then
+  begin
+    if Assigned(GOldGetStackInfoStringProc) then
+      Result := GOldGetStackInfoStringProc(Info)
+    else
+      Result := '';
+    Exit;
+  end;
+
+  if Assigned(GOldGetStackInfoStringProc) and (Ours^.Inner <> nil) then
+    Result := GOldGetStackInfoStringProc(Ours^.Inner)
+  else
+    Result := Ours^.Trace;
+end;
+
+procedure ExeWatchCleanUpStackInfo(Info: Pointer);
+var
+  Ours: PEWStackInfo;
+begin
+  Ours := EWStackInfoOf(Info);
+  if Ours = nil then
+  begin
+    if Assigned(GOldCleanUpStackInfoProc) then
+      GOldCleanUpStackInfoProc(Info);
+    Exit;
+  end;
+
+  if Assigned(GOldCleanUpStackInfoProc) and (Ours^.Inner <> nil) then
+    GOldCleanUpStackInfoProc(Ours^.Inner);
+  Dispose(Ours);
 end;
 {$ENDIF}
 // Old code marker for deletion start
@@ -1119,7 +1243,11 @@ begin
   // 1. SDK is initialized
   // 2. App is GUI (VCL/FMX)
   // 3. No framework hook is installed
-  if ExeWatchIsInitialized and ExeWatchIsGUIApplication and (not GFrameworkHookInstalled) then
+  // (not IsLibrary): inside the DLL SDK the VCL/FMX hook advice is inapplicable
+  // (a non-Delphi host can't add Delphi units); the host wires its own handler,
+  // so suppress the false-alarm warning when running as a library.
+  if ExeWatchIsInitialized and ExeWatchIsGUIApplication and (not GFrameworkHookInstalled)
+     and (not IsLibrary) then
   begin
     GExeWatch.Warning(
       'GUI application detected but no VCL/FMX exception hook installed. ' +
@@ -1390,6 +1518,8 @@ begin
   Result.AddPair('free_bytes', TJSONNumber.Create(FreeBytes));
   if DriveType <> '' then
     Result.AddPair('drive_type', DriveType);
+  if IsSSD >= 0 then
+    Result.AddPair('is_ssd', TJSONBool.Create(IsSSD = 1));
 end;
 
 { TMonitorInfo }
@@ -1406,6 +1536,288 @@ begin
     Result.AddPair('bits_per_pixel', TJSONNumber.Create(BitsPerPixel));
   Result.AddPair('primary', TJSONBool.Create(Primary));
 end;
+
+{$IFDEF MSWINDOWS}
+// ---------------------------------------------------------------------------
+// A handful of facts that answer "why is this machine slow?" on their own.
+//
+// All of it is read once, at startup, for about 8 ms in total. Deliberately no
+// WMI: a Win32_Processor query can block for seconds on a locked-down machine,
+// and this runs while the host application is still starting. None of it needs
+// administrator rights.
+// ---------------------------------------------------------------------------
+const
+  EW_SM_REMOTESESSION = $1000;
+  EW_IOCTL_STORAGE_QUERY_PROPERTY = $002D1400;
+  EW_STORAGE_SEEK_PENALTY_PROPERTY = 7;
+  EW_PROPERTY_STANDARD_QUERY = 0;
+  EW_POWER_PROCESSOR_INFORMATION = 11;  // POWER_INFORMATION_LEVEL
+  EW_GUID_PROCESSOR_SUBGROUP: TGUID = '{54533251-82BE-4824-96C1-47B60B740D00}';
+  EW_GUID_PROCESSOR_THROTTLE_MAX: TGUID = '{BC5038F7-23E0-4960-96DA-33ABAF5935EC}';
+
+type
+  TEWProcessorPowerInformation = record
+    Number: Cardinal;
+    MaxMhz: Cardinal;
+    CurrentMhz: Cardinal;
+    MhzLimit: Cardinal;
+    MaxIdleState: Cardinal;
+    CurrentIdleState: Cardinal;
+  end;
+
+  TEWStoragePropertyQuery = record
+    PropertyId: DWORD;
+    QueryType: DWORD;
+    AdditionalParameters: array[0..0] of Byte;
+  end;
+
+  TEWSeekPenaltyDescriptor = record
+    Version: DWORD;
+    Size: DWORD;
+    IncursSeekPenalty: Boolean;
+  end;
+
+  TEWCallNtPowerInformation = function(InformationLevel: Integer;
+    InputBuffer: Pointer; InputBufferSize: ULONG;
+    OutputBuffer: Pointer; OutputBufferSize: ULONG): Integer; stdcall;
+  TEWPowerGetActiveScheme = function(UserRootPowerKey: THandle;
+    var ActivePolicyGuid: PGUID): DWORD; stdcall;
+  TEWPowerReadACValueIndex = function(RootPowerKey: THandle;
+    SchemeGuid, SubGroupGuid, PowerSettingGuid: PGUID;
+    var ValueIndex: DWORD): DWORD; stdcall;
+
+var
+  GEWPowrProf: HMODULE = 0;
+  GEWPowrProfTried: Boolean = False;
+
+// powrprof.dll is loaded on demand rather than imported statically: a missing
+// static import stops the host application from starting at all, and a
+// monitoring SDK must never be the reason an app does not launch.
+function EWPowrProf: HMODULE;
+begin
+  if not GEWPowrProfTried then
+  begin
+    // Handle first, flag second. Two loggers can be constructed at once (one
+    // per tenant, say), and the other order lets the second thread see "already
+    // tried" while the handle is still zero, losing the CPU fields for it.
+    GEWPowrProf := LoadLibrary('powrprof.dll');
+    GEWPowrProfTried := True;
+  end;
+  Result := GEWPowrProf;
+end;
+
+procedure EWGetCpuSpeed(ALogicalProcessors: Integer; out AMaxMhz, AMinCoreMhz: Integer);
+var
+  Call: TEWCallNtPowerInformation;
+  Lib: HMODULE;
+  Info: array of TEWProcessorPowerInformation;
+  BufSize: Integer;
+  I: Integer;
+begin
+  AMaxMhz := 0;
+  AMinCoreMhz := 0;
+  if ALogicalProcessors <= 0 then
+    Exit;
+  Lib := EWPowrProf;
+  if Lib = 0 then
+    Exit;
+  Call := TEWCallNtPowerInformation(GetProcAddress(Lib, 'CallNtPowerInformation'));
+  if not Assigned(Call) then
+    Exit;
+
+  SetLength(Info, ALogicalProcessors);
+  BufSize := ALogicalProcessors * SizeOf(TEWProcessorPowerInformation);
+  FillChar(Info[0], BufSize, 0);
+  if Call(EW_POWER_PROCESSOR_INFORMATION, nil, 0, @Info[0], BufSize) <> 0 then
+    Exit;
+
+  for I := 0 to High(Info) do
+  begin
+    if Integer(Info[I].MaxMhz) > AMaxMhz then
+      AMaxMhz := Integer(Info[I].MaxMhz);
+    // MhzLimit is per core class, so on a hybrid CPU the lowest value is the
+    // efficiency cores. It is a specification, not a live measurement.
+    if (Info[I].MhzLimit > 0) and
+       ((AMinCoreMhz = 0) or (Integer(Info[I].MhzLimit) < AMinCoreMhz)) then
+      AMinCoreMhz := Integer(Info[I].MhzLimit);
+  end;
+end;
+
+function EWGetCpuThrottleMaxPct: Integer;
+var
+  Lib: HMODULE;
+  GetScheme: TEWPowerGetActiveScheme;
+  ReadValue: TEWPowerReadACValueIndex;
+  Scheme: PGUID;
+  Value: DWORD;
+begin
+  Result := -1;
+  Lib := EWPowrProf;
+  if Lib = 0 then
+    Exit;
+  GetScheme := TEWPowerGetActiveScheme(GetProcAddress(Lib, 'PowerGetActiveScheme'));
+  ReadValue := TEWPowerReadACValueIndex(GetProcAddress(Lib, 'PowerReadACValueIndex'));
+  if not (Assigned(GetScheme) and Assigned(ReadValue)) then
+    Exit;
+
+  Scheme := nil;
+  if GetScheme(0, Scheme) <> ERROR_SUCCESS then
+    Exit;
+  try
+    Value := 0;
+    if ReadValue(0, Scheme, @EW_GUID_PROCESSOR_SUBGROUP,
+                 @EW_GUID_PROCESSOR_THROTTLE_MAX, Value) = ERROR_SUCCESS then
+      Result := Integer(Value);
+  finally
+    LocalFree(HLOCAL(Scheme));
+  end;
+end;
+
+function EWGetPowerSource: string;
+var
+  Status: TSystemPowerStatus;
+begin
+  Result := '';
+  if not GetSystemPowerStatus(Status) then
+    Exit;
+  case Status.ACLineStatus of
+    0: Result := 'battery';
+    1: Result := 'ac';
+  end;
+end;
+
+function EWGetDriveIsSSD(ADriveLetter: Char): Integer;
+var
+  H: THandle;
+  Query: TEWStoragePropertyQuery;
+  Descriptor: TEWSeekPenaltyDescriptor;
+  Returned: DWORD;
+begin
+  Result := -1;
+  // Zero desired access is enough for a property query, and it is what keeps
+  // this working without administrator rights.
+  H := CreateFile(PChar('\\.\' + ADriveLetter + ':'), 0,
+                  FILE_SHARE_READ or FILE_SHARE_WRITE, nil, OPEN_EXISTING, 0, 0);
+  if H = INVALID_HANDLE_VALUE then
+    Exit;
+  try
+    FillChar(Query, SizeOf(Query), 0);
+    Query.PropertyId := EW_STORAGE_SEEK_PENALTY_PROPERTY;
+    Query.QueryType := EW_PROPERTY_STANDARD_QUERY;
+    FillChar(Descriptor, SizeOf(Descriptor), 0);
+    Returned := 0;
+    if DeviceIoControl(H, EW_IOCTL_STORAGE_QUERY_PROPERTY, @Query, SizeOf(Query),
+                       @Descriptor, SizeOf(Descriptor), Returned, nil) then
+    begin
+      if Descriptor.IncursSeekPenalty then
+        Result := 0
+      else
+        Result := 1;
+    end;
+  finally
+    CloseHandle(H);
+  end;
+end;
+{$ENDIF}
+
+{$IFDEF LINUX}
+// ---------------------------------------------------------------------------
+// The same "why is this machine slow?" facts, where Linux has an answer.
+//
+// Read from /sys, not /proc: the values are one number per file, and the CPU
+// section of this unit already carries a note that reading /proc caused
+// trouble. Every read is guarded, and a missing file leaves the field absent
+// rather than guessed.
+// ---------------------------------------------------------------------------
+const
+  EW_LINUX_CPU_SCAN_LIMIT = 512;   // stop walking cpuN long before /sys does
+
+// Read one small integer out of a /sys or /proc file.
+//
+// Deliberately POSIX I/O and not TStringList or TFile: files under /sys and
+// /proc report a size of zero, and the RTL readers that trust that size raise
+// ERangeError on them. That is a documented trap in this SDK, see the Linux
+// notes in docs/sdk-roadmap.md, and it is why CPU name and core count are
+// still missing on Linux.
+function EWReadSysInt(const APath: string; out AValue: Int64): Boolean;
+var
+  Handle: Integer;
+  Buffer: array[0..63] of Byte;
+  Count: NativeInt;
+begin
+  Result := False;
+  AValue := 0;
+  Handle := open(PAnsiChar(AnsiString(APath)), O_RDONLY);
+  if Handle < 0 then
+    Exit;
+  try
+    FillChar(Buffer, SizeOf(Buffer), 0);
+    Count := __read(Handle, @Buffer[0], SizeOf(Buffer) - 1);
+    if Count <= 0 then
+      Exit;
+    Result := TryStrToInt64(Trim(string(AnsiString(PAnsiChar(@Buffer[0])))), AValue);
+  finally
+    __close(Handle);
+  end;
+end;
+
+procedure EWLinuxGetCpuSpeed(out AMaxMhz, AMinCoreMhz, AThrottleMaxPct: Integer);
+var
+  I, Misses: Integer;
+  Dir: string;
+  Nominal, Scaling: Int64;
+  MaxNominalKHz, MinNominalKHz, MaxScalingKHz: Int64;
+begin
+  AMaxMhz := 0;
+  AMinCoreMhz := 0;
+  AThrottleMaxPct := -1;
+  MaxNominalKHz := 0;
+  MinNominalKHz := 0;
+  MaxScalingKHz := 0;
+  Misses := 0;
+
+  for I := 0 to EW_LINUX_CPU_SCAN_LIMIT - 1 do
+  begin
+    Dir := Format('/sys/devices/system/cpu/cpu%d/cpufreq/', [I]);
+    if not DirectoryExists(Dir) then
+    begin
+      // A run of missing entries means either the end of the list or a machine
+      // with no cpufreq at all, which is the common case inside a VM. A short
+      // tolerance covers an offline core without walking all 512.
+      Inc(Misses);
+      if Misses >= 4 then
+        Break;
+      Continue;
+    end;
+    Misses := 0;
+
+    // base_frequency is the nominal clock and matches what Windows reports.
+    // cpuinfo_max_freq includes boost, so it is only the fallback: better a
+    // slightly different meaning than no number at all.
+    if not EWReadSysInt(Dir + 'base_frequency', Nominal) then
+      if not EWReadSysInt(Dir + 'cpuinfo_max_freq', Nominal) then
+        Nominal := 0;
+
+    if Nominal > 0 then
+    begin
+      if Nominal > MaxNominalKHz then
+        MaxNominalKHz := Nominal;
+      if (MinNominalKHz = 0) or (Nominal < MinNominalKHz) then
+        MinNominalKHz := Nominal;
+    end;
+
+    // What the governor currently allows. Below the nominal clock it is the
+    // Linux equivalent of a power plan holding the processor down.
+    if EWReadSysInt(Dir + 'scaling_max_freq', Scaling) and (Scaling > MaxScalingKHz) then
+      MaxScalingKHz := Scaling;
+  end;
+
+  AMaxMhz := Integer(MaxNominalKHz div 1000);
+  AMinCoreMhz := Integer(MinNominalKHz div 1000);
+  if (MaxNominalKHz > 0) and (MaxScalingKHz > 0) then
+    AThrottleMaxPct := Integer(Round(MaxScalingKHz / MaxNominalKHz * 100));
+end;
+{$ENDIF}
 
 { THardwareInfo }
 
@@ -1509,6 +1921,17 @@ begin
   if Result.CPUCores = 0 then
     Result.CPUCores := Result.CPULogicalProcessors; // Fallback
 
+  // Why is this machine slow? The clock is only a denominator, useful for
+  // comparing machines and normalising timings. The three that follow answer
+  // the question on their own.
+  EWGetCpuSpeed(Result.CPULogicalProcessors, Result.CPUMaxMhz, Result.CPUMinCoreMhz);
+  Result.CPUThrottleMaxPct := EWGetCpuThrottleMaxPct;
+  Result.PowerSource := EWGetPowerSource;
+  if GetSystemMetrics(EW_SM_REMOTESESSION) <> 0 then
+    Result.RemoteSession := 1
+  else
+    Result.RemoteSession := 0;
+
   // Disks
   //
   // GetVolumeInformation / GetDiskFreeSpaceEx on an empty removable drive
@@ -1576,6 +1999,13 @@ begin
           else
             DiskInfoRec.DriveType := 'Unknown';
           end;
+
+          // Only local disks: asking a network share or a CD whether it seeks
+          // means waking hardware for an answer that would mean nothing.
+          if DriveTypeVal = DRIVE_FIXED then
+            DiskInfoRec.IsSSD := EWGetDriveIsSSD(DriveChar)
+          else
+            DiskInfoRec.IsSSD := -1;
 
           SetLength(Result.Disks, Length(Result.Disks) + 1);
           Result.Disks[High(Result.Disks)] := DiskInfoRec;
@@ -1732,6 +2162,14 @@ begin
   {$ENDIF}
   {$ENDIF}
 
+  // Not available on this platform. Absent rather than wrong: the backend
+  // treats every one of these as optional.
+  Result.CPUMaxMhz := 0;
+  Result.CPUMinCoreMhz := 0;
+  Result.CPUThrottleMaxPct := -1;
+  Result.PowerSource := '';
+  Result.RemoteSession := -1;
+
   SetLength(Result.Disks, 0);
 
   // Screen info via Configuration (screenWidthDp * densityDpi / 160 = pixels)
@@ -1800,10 +2238,12 @@ begin
     // Ignore errors
   end;
 
-  // CPU - minimal info (reading /proc causes issues)
+  // CPU name still needs /proc/cpuinfo parsed, see docs/sdk-roadmap.md. The
+  // counts do not: TThread.ProcessorCount goes through sysconf, which is what
+  // the Android branch of this function already relies on.
   Result.CPUName := '';
-  Result.CPUCores := 0;
-  Result.CPULogicalProcessors := 0;
+  Result.CPUCores := TThread.ProcessorCount;
+  Result.CPULogicalProcessors := TThread.ProcessorCount;
 
   // CPU Architecture
   {$IFDEF CPUX64}
@@ -1822,6 +2262,12 @@ begin
   {$ENDIF}
   {$ENDIF}
   {$ENDIF}
+
+  EWLinuxGetCpuSpeed(Result.CPUMaxMhz, Result.CPUMinCoreMhz, Result.CPUThrottleMaxPct);
+  // No battery on a Linux server, and reporting "ac" for every one of them says
+  // nothing. is_ssd would need the disk enumeration this branch does not have.
+  Result.PowerSource := '';
+  Result.RemoteSession := -1;
   {$ENDIF}
 
   SetLength(Result.Disks, 0);
@@ -1875,6 +2321,14 @@ begin
   Result.CPUCores := 0;
   Result.CPULogicalProcessors := 0;
   Result.CPUArchitecture := '';
+
+  // Not available on this platform. Absent rather than wrong: the backend
+  // treats every one of these as optional.
+  Result.CPUMaxMhz := 0;
+  Result.CPUMinCoreMhz := 0;
+  Result.CPUThrottleMaxPct := -1;
+  Result.PowerSource := '';
+  Result.RemoteSession := -1;
   SetLength(Result.Disks, 0);
   SetLength(Result.Monitors, 0);
   Result.ExecutablePath := ParamStr(0);
@@ -1914,6 +2368,16 @@ begin
     Result.AddPair('cpu_logical_processors', TJSONNumber.Create(CPULogicalProcessors));
   if CPUArchitecture <> '' then
     Result.AddPair('cpu_architecture', CPUArchitecture);
+  if CPUMaxMhz > 0 then
+    Result.AddPair('cpu_max_mhz', TJSONNumber.Create(CPUMaxMhz));
+  if CPUMinCoreMhz > 0 then
+    Result.AddPair('cpu_min_core_mhz', TJSONNumber.Create(CPUMinCoreMhz));
+  if CPUThrottleMaxPct >= 0 then
+    Result.AddPair('cpu_throttle_max_pct', TJSONNumber.Create(CPUThrottleMaxPct));
+  if PowerSource <> '' then
+    Result.AddPair('power_source', PowerSource);
+  if RemoteSession >= 0 then
+    Result.AddPair('remote_session', TJSONBool.Create(RemoteSession = 1));
 
   // Disks
   if Length(Disks) > 0 then
@@ -5675,9 +6139,19 @@ end;
 {$ENDIF}
 
 function GetLastExceptionStackTrace(E: Exception): string;
+{$IFDEF MSWINDOWS}
+var
+  Ours: PEWStackInfo;
+{$ENDIF}
 begin
-  Result := GLastExceptionStackTrace;
-  GLastExceptionStackTrace := ''; // consume it
+  Result := '';
+{$IFDEF MSWINDOWS}
+  if E = nil then
+    Exit;
+  Ours := EWStackInfoOf(E.StackInfo);
+  if Ours <> nil then
+    Result := Ours^.Trace;
+{$ENDIF}
 end;
 
 {$IFDEF EXEWATCH_TESTING}
@@ -5685,6 +6159,12 @@ function EWGetStackTraceStr(FramesToSkip: Integer = 0): string;
 begin
   Result := GetStackTraceStr(FramesToSkip);
 end;
+{$IFDEF LINUX}
+function EWTestReadSysInt(const APath: string; out AValue: Int64): Boolean;
+begin
+  Result := EWReadSysInt(APath, AValue);
+end;
+{$ENDIF}
 {$ENDIF}
 
 initialization
@@ -5695,7 +6175,11 @@ initialization
   // Capture stack at raise time (Win64 only — table-based unwinding works)
   {$IFDEF MSWINDOWS}
   GOldGetExceptionStackInfoProc := Exception.GetExceptionStackInfoProc;
+  GOldGetStackInfoStringProc := Exception.GetStackInfoStringProc;
+  GOldCleanUpStackInfoProc := Exception.CleanUpStackInfoProc;
   Exception.GetExceptionStackInfoProc := @ExeWatchGetExceptionStackInfo;
+  Exception.GetStackInfoStringProc := @ExeWatchGetStackInfoString;
+  Exception.CleanUpStackInfoProc := @ExeWatchCleanUpStackInfo;
   {$ENDIF}
 
 finalization
@@ -5703,6 +6187,8 @@ finalization
   System.ExceptProc := @GOldExceptProc;
   {$IFDEF MSWINDOWS}
   Exception.GetExceptionStackInfoProc := GOldGetExceptionStackInfoProc;
+  Exception.GetStackInfoStringProc := GOldGetStackInfoStringProc;
+  Exception.CleanUpStackInfoProc := GOldCleanUpStackInfoProc;
   {$ENDIF}
   FinalizeExeWatch;
   FreeAndNil(GExeWatchLock);
