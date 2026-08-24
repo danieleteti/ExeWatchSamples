@@ -126,7 +126,7 @@ begin
     WriteLn('Put your key from https://exewatch.com in a file named .env next to');
     WriteLn('this executable, as a single line:');
     WriteLn;
-    WriteLn('    ', API_KEY_SETTING, '=ew_win_your_key_here');
+    WriteLn('    ' + API_KEY_SETTING + '=ew_win_your_key_here');
     WriteLn;
     WriteLn('That folder is gitignored, so the key stays out of the repository.');
     Halt(1);

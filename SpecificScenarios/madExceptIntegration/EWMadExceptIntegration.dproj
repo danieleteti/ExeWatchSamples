@@ -59,7 +59,13 @@
         <SanitizedProjectName>EWMadExceptIntegration</SanitizedProjectName>
         <VerInfo_Locale>1033</VerInfo_Locale>
         <VerInfo_Keys>CompanyName=;FileDescription=$(MSBuildProjectName);FileVersion=1.0.0.0;InternalName=;LegalCopyright=;LegalTrademarks=;OriginalFilename=;ProgramID=com.embarcadero.$(MSBuildProjectName);ProductName=$(MSBuildProjectName);ProductVersion=1.0.0.0;Comments=</VerInfo_Keys>
-        <DCC_UnitSearchPath>..\..\DelphiCommons;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+        <!-- madExcept installa le sue unit per IDE (BDS23 = D12, BDS37 = D13) e non
+             sempre si registra nella library path che msbuild legge. Elencate qui
+             entrambe, la piu' recente per prima: le DCU non sono intercambiabili fra IDE.
+             Radice sovrascrivibile con -p:MadCollectionDir=... se l'installazione
+             non e' quella di default. -->
+        <MadCollectionDir Condition="'$(MadCollectionDir)' == ''">C:\Program Files (x86)\madCollection</MadCollectionDir>
+        <DCC_UnitSearchPath>$(MadCollectionDir)\madExcept\BDS37\$(Platform);$(MadCollectionDir)\madBasic\BDS37\$(Platform);$(MadCollectionDir)\madDisAsm\BDS37\$(Platform);$(MadCollectionDir)\madKernel\BDS37\$(Platform);$(MadCollectionDir)\madExcept\BDS23\$(Platform);$(MadCollectionDir)\madBasic\BDS23\$(Platform);$(MadCollectionDir)\madDisAsm\BDS23\$(Platform);$(MadCollectionDir)\madKernel\BDS23\$(Platform);..\..\DelphiCommons;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base_Win32)'!=''">
         <DCC_Namespace>Winapi;System.Win;Data.Win;Datasnap.Win;Web.Win;Soap.Win;Xml.Win;Bde;$(DCC_Namespace)</DCC_Namespace>

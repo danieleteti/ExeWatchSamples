@@ -52,6 +52,7 @@
         <Base>true</Base>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base)'!=''">
+        <DCC_UnitSearchPath>..\DelphiCommons;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
         <DCC_E>false</DCC_E>
         <DCC_F>false</DCC_F>
         <DCC_K>false</DCC_K>
@@ -134,6 +135,7 @@
         <DelphiCompile Include="$(MainSource)">
             <MainSource>MainSource</MainSource>
         </DelphiCompile>
+        <DCCReference Include="..\DelphiCommons\ExeWatchSDKv1.pas"/>
         <DCCReference Include="ControllerU.pas"/>
         <DCCReference Include="EntitiesU.pas"/>
         <DCCReference Include="WebModuleU.pas">

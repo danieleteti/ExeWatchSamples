@@ -46,7 +46,7 @@ uses
   System.Diagnostics;  // For TStopwatch (high-precision timing)
 
 const
-  EXEWATCH_SDK_VERSION = '0.23.0';
+  EXEWATCH_SDK_VERSION = '0.23.2';
   EXEWATCH_API_VERSION = 'v1';  // API version this SDK targets
   {$IF NOT DEFINED(LOCAL_EXEWATCH)}
   EXEWATCH_ENDPOINT = 'https://exewatch.com';
@@ -831,6 +831,36 @@ function GetLastExceptionStackTrace(E: Exception): string;
 
 {$IFDEF EXEWATCH_TESTING}
 function EWGetStackTraceStr(FramesToSkip: Integer = 0): string;
+{$IFDEF MSWINDOWS}
+/// <summary>
+///   Exposed for the test project only. The symbol table is built once, on the
+///   first exception of the process, and the race lives in exactly that
+///   moment - so a test has to be able to put it back to never-loaded.
+///   AYieldBeforeClaim widens the window so the race is reproducible instead
+///   of depending on a two-instruction gap between threads.
+/// </summary>
+procedure EWTestResetStackTraceInit(AYieldBeforeClaim: Boolean);
+/// <summary>
+///   Highest number of threads that were ever inside STLoadMap at the same
+///   time. Above 1 means two threads were freeing and regrowing the same
+///   arrays under each other.
+/// </summary>
+function EWTestMaxConcurrentMapLoads: Integer;
+/// <summary>
+///   Replaces the symbol table with synthetic entries, so resolution can be
+///   probed without an executable of the size that would be needed to reach
+///   those addresses for real.
+/// </summary>
+procedure EWTestSeedSymbols(ACount: Integer; AStep: NativeUInt; ACodeBase: NativeUInt);
+function EWTestFindSymbol(AAddress: NativeUInt): string;
+/// <summary>
+///   Exposed for the test project only. Drives the real restore path with a
+///   probe: the finalization runs at process exit, after the last test has
+///   reported, so this is the only way to exercise the line. Returns an empty
+///   string when both properties hold, otherwise what went wrong.
+/// </summary>
+function EWTestRtlHookRestoreCheck: string;
+{$ENDIF}
 {$IFDEF LINUX}
 /// <summary>
 ///   Exposed for the test project only. /sys and /proc files report a size of
@@ -5677,6 +5707,17 @@ end;
 
 const
   ST_MAX_FRAMES = 62;
+  // STEnsureInit publishes the symbol table only once it is complete. Two
+  // threads used to pass the flag check together and both load, each freeing
+  // and regrowing the arrays under the other.
+  ST_INIT_IDLE = 0;
+  ST_INIT_LOADING = 1;
+  ST_INIT_READY = 2;
+  // How far past the last entry of the map an address may still be attributed
+  // to it. The bound used to be a flat $1000000, which silently refused to
+  // resolve anything more than 16 MB past the module base - a real limit for a
+  // large executable, and invisible when it bites.
+  ST_ADDR_SLACK = $10000;
 
 type
   TSTSymbol = record
@@ -5697,8 +5738,17 @@ var
   GSTSegOffsets: array[1..8] of NativeUInt;
   GSTSegCount: Integer;
   GSTLoaded: Boolean;
-  GSTInitialized: Boolean;
+  GSTInitState: Integer;  // ST_INIT_* - touched only through TInterlocked
   GSTProgramName: string;
+{$IFDEF EXEWATCH_TESTING}
+  // Counts threads inside STLoadMap. More than one at a time IS the defect,
+  // and is what the regression test asserts against.
+  GSTLoadInFlight: Integer;
+  GSTLoadInFlightMax: Integer;
+  // Widens the window between reading the state and claiming it, so the race
+  // is reproducible instead of depending on a two-instruction gap.
+  GSTTestYieldBeforeClaim: Boolean;
+{$ENDIF}
 
 type
   TRtlCaptureStackBackTrace = function(
@@ -5819,6 +5869,11 @@ var
   SegNum: Integer;
   SymCount, LineCount: Integer;
 begin
+{$IFDEF EXEWATCH_TESTING}
+  if TInterlocked.Increment(GSTLoadInFlight) > GSTLoadInFlightMax then
+    GSTLoadInFlightMax := GSTLoadInFlight;
+  try
+{$ENDIF}
   GSTLoaded := False;
   SetLength(GSTSymbols, 0);
   SetLength(GSTLines, 0);
@@ -5964,42 +6019,72 @@ begin
   finally
     SL.Free;
   end;
+{$IFDEF EXEWATCH_TESTING}
+  finally
+    TInterlocked.Decrement(GSTLoadInFlight);
+  end;
+{$ENDIF}
 end;
 
 function STFindSymbol(Address: NativeUInt): string;
 var
-  I: Integer;
+  Lo, Hi, Mid, Found: Integer;
   RelAddr: NativeUInt;
 begin
   Result := '';
   if (Length(GSTSymbols) = 0) or (Address < GSTCodeBase) then Exit;
   RelAddr := Address - GSTCodeBase;
-  if RelAddr > $1000000 then Exit;
-  for I := High(GSTSymbols) downto 0 do
+  // Bounded by what the map actually covers, not by a flat 16 MB.
+  if RelAddr > GSTSymbols[High(GSTSymbols)].Address + ST_ADDR_SLACK then Exit;
+  // Sorted ascending by STSortSymbols, so the last entry <= RelAddr is found
+  // by halving instead of by walking. This runs for every frame of every
+  // exception, and a large map holds ~10^6 entries.
+  Lo := 0;
+  Hi := High(GSTSymbols);
+  Found := -1;
+  while Lo <= Hi do
   begin
-    if GSTSymbols[I].Address <= RelAddr then
-      Exit(GSTSymbols[I].Name);
+    Mid := Lo + (Hi - Lo) div 2;
+    if GSTSymbols[Mid].Address <= RelAddr then
+    begin
+      Found := Mid;
+      Lo := Mid + 1;
+    end
+    else
+      Hi := Mid - 1;
   end;
+  if Found >= 0 then
+    Result := GSTSymbols[Found].Name;
 end;
 
 procedure STFindLine(Address: NativeUInt; out ALine: Integer; out AUnit: string);
 var
-  I: Integer;
+  Lo, Hi, Mid, Found: Integer;
   RelAddr: NativeUInt;
 begin
   ALine := 0;
   AUnit := '';
   if (Length(GSTLines) = 0) or (Address < GSTCodeBase) then Exit;
   RelAddr := Address - GSTCodeBase;
-  if RelAddr > $1000000 then Exit;
-  for I := High(GSTLines) downto 0 do
+  if RelAddr > GSTLines[High(GSTLines)].Address + ST_ADDR_SLACK then Exit;
+  Lo := 0;
+  Hi := High(GSTLines);
+  Found := -1;
+  while Lo <= Hi do
   begin
-    if GSTLines[I].Address <= RelAddr then
+    Mid := Lo + (Hi - Lo) div 2;
+    if GSTLines[Mid].Address <= RelAddr then
     begin
-      ALine := GSTLines[I].Line;
-      AUnit := GSTLines[I].UnitName;
-      Exit;
-    end;
+      Found := Mid;
+      Lo := Mid + 1;
+    end
+    else
+      Hi := Mid - 1;
+  end;
+  if Found >= 0 then
+  begin
+    ALine := GSTLines[Found].Line;
+    AUnit := GSTLines[Found].UnitName;
   end;
 end;
 
@@ -6039,16 +6124,35 @@ begin
     @GSTCapture := GetProcAddress(H, 'RtlCaptureStackBackTrace');
 end;
 
-procedure STEnsureInit;
+// One thread builds the symbol table. A thread arriving while it is being
+// built gives up its trace rather than read GSTSymbols/GSTLines while
+// STLoadMap is freeing and regrowing them: a missing trace beats a torn read,
+// and on a {$R-} build the torn read corrupts the heap instead of raising.
+// Returns True only when the table is complete and safe to consult.
+function STEnsureInit: Boolean;
 var
   MapFile: string;
 begin
-  if GSTInitialized then Exit;
-  GSTInitialized := True;
-  STInitCapture;
-  GSTCodeBase := NativeUInt(HInstance);
-  MapFile := ChangeFileExt(GetModuleName(HInstance), '.map');
-  STLoadMap(MapFile);
+  Result := GSTInitState = ST_INIT_READY;
+  if Result then
+    Exit;
+{$IFDEF EXEWATCH_TESTING}
+  if GSTTestYieldBeforeClaim then
+    Sleep(1);
+{$ENDIF}
+  // Whoever wins this claims the load; everyone else leaves empty-handed.
+  if TInterlocked.CompareExchange(GSTInitState, ST_INIT_LOADING, ST_INIT_IDLE) <> ST_INIT_IDLE then
+    Exit;
+  try
+    STInitCapture;
+    GSTCodeBase := NativeUInt(HInstance);
+    MapFile := ChangeFileExt(GetModuleName(HInstance), '.map');
+    STLoadMap(MapFile);
+  finally
+    // Published last: a thread that sees ST_INIT_READY sees a complete table.
+    TInterlocked.Exchange(GSTInitState, ST_INIT_READY);
+  end;
+  Result := True;
 end;
 
 function IsRTLInternalFrame(const ALine: string): Boolean;
@@ -6089,7 +6193,10 @@ var
   S: string;
 begin
   Result := '';
-  STEnsureInit;
+  // Not ready means another thread is still building the table; reading it now
+  // is a torn read, so this frame simply goes without a trace.
+  if not STEnsureInit then
+    Exit;
   if not Assigned(GSTCapture) then Exit;
 
   FillChar(Frames, SizeOf(Frames), 0);
@@ -6154,11 +6261,135 @@ begin
 {$ENDIF}
 end;
 
+// Gives the RTL hooks back only if they are still ours. Units finalize in
+// reverse initialization order, so anything listed before ExeWatch in the .dpr
+// finalizes AFTER it: an unconditional restore tears out a handler that another
+// unit installed on top of us, and does it exactly while a crash reporter should
+// still be working.
+//
+// Extracted from the finalization so the suite can drive it. The finalization
+// itself runs at process exit, after the last test has reported, so the only way
+// to test this line is to have it somewhere else.
+procedure ExeWatchRestoreRtlHooks;
+begin
+  if System.ExceptProc = @ExeWatchExceptProc then
+    System.ExceptProc := @GOldExceptProc;
+{$IFDEF MSWINDOWS}
+  if @Exception.GetExceptionStackInfoProc = @ExeWatchGetExceptionStackInfo then
+    Exception.GetExceptionStackInfoProc := GOldGetExceptionStackInfoProc;
+  if @Exception.GetStackInfoStringProc = @ExeWatchGetStackInfoString then
+    Exception.GetStackInfoStringProc := GOldGetStackInfoStringProc;
+  if @Exception.CleanUpStackInfoProc = @ExeWatchCleanUpStackInfo then
+    Exception.CleanUpStackInfoProc := GOldCleanUpStackInfoProc;
+{$ENDIF}
+end;
+
 {$IFDEF EXEWATCH_TESTING}
 function EWGetStackTraceStr(FramesToSkip: Integer = 0): string;
 begin
   Result := GetStackTraceStr(FramesToSkip);
 end;
+
+{$IFDEF MSWINDOWS}
+// Puts the symbol table back to never-loaded so a test can drive the very
+// first initialisation, which is the only moment the race exists.
+procedure EWTestResetStackTraceInit(AYieldBeforeClaim: Boolean);
+begin
+  GSTTestYieldBeforeClaim := AYieldBeforeClaim;
+  GSTLoadInFlight := 0;
+  GSTLoadInFlightMax := 0;
+  SetLength(GSTSymbols, 0);
+  SetLength(GSTLines, 0);
+  GSTLoaded := False;
+  GSTInitState := ST_INIT_IDLE;
+end;
+
+// Highest number of threads ever inside STLoadMap at once. Anything above 1
+// means two threads were rebuilding the same arrays.
+function EWTestMaxConcurrentMapLoads: Integer;
+begin
+  Result := GSTLoadInFlightMax;
+end;
+
+// Replaces the symbol table with ACount synthetic entries at AStep intervals,
+// so a test can probe resolution without needing a real executable of that
+// size. Leaves the table published, as a completed load would.
+procedure EWTestSeedSymbols(ACount: Integer; AStep: NativeUInt; ACodeBase: NativeUInt);
+var
+  I: Integer;
+begin
+  GSTCodeBase := ACodeBase;
+  SetLength(GSTSymbols, ACount);
+  for I := 0 to ACount - 1 do
+  begin
+    GSTSymbols[I].Address := NativeUInt(I) * AStep;
+    GSTSymbols[I].Name := 'Seeded.Sym' + IntToStr(I);
+  end;
+  SetLength(GSTLines, 0);
+  GSTLoaded := True;
+  GSTInitState := ST_INIT_READY;
+end;
+
+function EWTestFindSymbol(AAddress: NativeUInt): string;
+begin
+  Result := STFindSymbol(AAddress);
+end;
+
+// Two stand-ins for the round trip below. Neither is ever called.
+procedure EWTestProbeOldExceptProc(ExceptObject: TObject; ExceptAddr: Pointer);
+begin
+end;
+
+procedure EWTestProbeOtherExceptProc(ExceptObject: TObject; ExceptAddr: Pointer);
+begin
+end;
+
+function EWTestRtlHookRestoreCheck: string;
+var
+  RealOld: procedure(ExceptObject: TObject; ExceptAddr: Pointer);
+  RealCurrent: Pointer;
+  RealGetInfo: function(P: System.PExceptionRecord): Pointer;
+  RealGetString: function(Info: Pointer): string;
+  RealCleanUp: procedure(Info: Pointer);
+begin
+  Result := '';
+  RealOld := GOldExceptProc;
+  RealCurrent := System.ExceptProc;
+  // ExeWatchRestoreRtlHooks gives back ALL FOUR hooks, so driving it here
+  // unhooks the stack-trace capture that later tests depend on. Everything it
+  // can touch is saved, not just the one this check is about.
+  RealGetInfo := Exception.GetExceptionStackInfoProc;
+  RealGetString := Exception.GetStackInfoStringProc;
+  RealCleanUp := Exception.CleanUpStackInfoProc;
+  try
+    // 1) the hook is still ours, so it must go back to what we found.
+    //    If the restore ever became `@@GOldExceptProc`, System.ExceptProc would
+    //    hold the ADDRESS OF THE VARIABLE and this comparison would fail - which
+    //    is exactly the change a reader of the 2026-08-22 customer report might
+    //    make in good faith.
+    GOldExceptProc := EWTestProbeOldExceptProc;
+    System.ExceptProc := @ExeWatchExceptProc;
+    ExeWatchRestoreRtlHooks;
+    if System.ExceptProc <> @EWTestProbeOldExceptProc then
+      Result := 'the saved handler did not come back; the hook now points elsewhere';
+
+    // 2) somebody installed their own handler after us: leave it alone.
+    if Result = '' then
+    begin
+      System.ExceptProc := @EWTestProbeOtherExceptProc;
+      ExeWatchRestoreRtlHooks;
+      if System.ExceptProc <> @EWTestProbeOtherExceptProc then
+        Result := 'a handler installed after ours was torn out by the restore';
+    end;
+  finally
+    GOldExceptProc := RealOld;
+    System.ExceptProc := RealCurrent;
+    Exception.GetExceptionStackInfoProc := RealGetInfo;
+    Exception.GetStackInfoStringProc := RealGetString;
+    Exception.CleanUpStackInfoProc := RealCleanUp;
+  end;
+end;
+{$ENDIF}
 {$IFDEF LINUX}
 function EWTestReadSysInt(const APath: string; out AValue: Int64): Boolean;
 begin
@@ -6183,13 +6414,7 @@ initialization
   {$ENDIF}
 
 finalization
-  // Restore old handlers
-  System.ExceptProc := @GOldExceptProc;
-  {$IFDEF MSWINDOWS}
-  Exception.GetExceptionStackInfoProc := GOldGetExceptionStackInfoProc;
-  Exception.GetStackInfoStringProc := GOldGetStackInfoStringProc;
-  Exception.CleanUpStackInfoProc := GOldCleanUpStackInfoProc;
-  {$ENDIF}
+  ExeWatchRestoreRtlHooks;
   FinalizeExeWatch;
   FreeAndNil(GExeWatchLock);
 

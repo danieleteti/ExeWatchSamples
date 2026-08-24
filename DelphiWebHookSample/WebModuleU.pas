@@ -93,7 +93,7 @@ begin
     end);
 
   // Controllers
-  fMVC.AddController(TAPIController);
+  fMVC.AddController(TExeWatchWebHookController);
   // Controllers - END
 
   // Middleware
