@@ -46,7 +46,7 @@ uses
   System.Diagnostics;  // For TStopwatch (high-precision timing)
 
 const
-  EXEWATCH_SDK_VERSION = '0.23.2';
+  EXEWATCH_SDK_VERSION = '0.24.1';
   EXEWATCH_API_VERSION = 'v1';  // API version this SDK targets
   {$IF NOT DEFINED(LOCAL_EXEWATCH)}
   EXEWATCH_ENDPOINT = 'https://exewatch.com';
@@ -56,6 +56,7 @@ const
   EXEWATCH_DEFAULT_BUFFER_SIZE = 100;
   EXEWATCH_DEFAULT_FLUSH_INTERVAL_MS = 5000;
   EXEWATCH_DEFAULT_RETRY_INTERVAL_MS = 30000;
+  EXEWATCH_ERROR_PERSIST_MIN_GAP_MS = 1000;  // at most one error-triggered write to disk per second
   EXEWATCH_DEFAULT_SAMPLE_RATE = 1.0;  // 1.0 = 100%, 0.5 = 50%
   EXEWATCH_MAX_BREADCRUMBS = 20;
   EXEWATCH_MAX_PENDING_TIMINGS = 100;
@@ -63,6 +64,7 @@ const
   EXEWATCH_DEVICE_FILE_EXTENSION = '.ewdevice';
   EXEWATCH_METRIC_FILE_EXTENSION = '.ewmetric';
   EXEWATCH_SENDING_EXTENSION = '.sending';
+  EXEWATCH_TEMP_EXTENSION = '.tmp';
   EXEWATCH_DEFAULT_GAUGE_SAMPLING_INTERVAL_SEC = 30;
   EXEWATCH_MIN_GAUGE_SAMPLING_INTERVAL_SEC = 10;
   EXEWATCH_MAX_REGISTERED_GAUGES = 20;
@@ -402,6 +404,8 @@ type
     FBuffer: TList<TLogEvent>;
     FBufferLock: TCriticalSection;
     FShipperThread: TThread;
+    FPersistThread: TThread;
+    FPersistEvent: TEvent;
     FShutdown: Boolean;
     FShutdownEvent: TEvent;
     FOnError: TOnLogError;
@@ -460,6 +464,7 @@ type
     FRegisteredGaugesLock: TCriticalSection;
     FSamplerThread: TThread;
     FLastMetricFlushTime: TDateTime;
+    FLastErrorPersistTick: UInt64;
     procedure SamplerThreadExecute;
     procedure PersistMetricBuffer;
     procedure UnregisterPeriodicGaugeInternal(const AName: string);
@@ -481,6 +486,7 @@ type
     function SendToServer(const AFilePath: string): Boolean;
     function RemoveInvalidEventsFromFile(const AFilePath, AResponseJson: string): Boolean;
     procedure ShipperThreadExecute;
+    procedure PersistThreadExecute;
     procedure DoError(const AMessage: string);
     procedure DoLogsSent(AAccepted, ARejected: Integer);
     procedure DoDeviceInfoSent(ASuccess: Boolean; const AErrorMessage: string);
@@ -1137,8 +1143,9 @@ begin
   Config := TExeWatchConfig.Create(AApiKey, ACustomerId);
   Config.AppVersion := AAppVersion;
   Config.AnonymizeDeviceId := AAnonymizeDeviceId;
+  // The constructor already queues the device info: calling SendDeviceInfo here
+  // would collect the hardware a second time on the caller's thread.
   InitializeExeWatch(Config);
-  GExeWatch.SendDeviceInfo;
   // Warn if GUI app without VCL/FMX hook (deferred to allow hook units to register first)
   CheckAndWarnAboutFrameworkHook;
 end;
@@ -1995,14 +2002,17 @@ begin
         begin
           DiskInfoRec.Drive := DriveChar + ':';
 
-          // Get volume info
+          // A network drive is listed but never queried: on a mapped share whose
+          // server is unreachable (a laptop away from the office) each call waits
+          // for the SMB timeout, tens of seconds, on the host's startup thread.
           FillChar(VolumeNameBuf, SizeOf(VolumeNameBuf), 0);
           FillChar(FileSystemBuf, SizeOf(FileSystemBuf), 0);
           VolSerial := 0;
           MaxCompLen := 0;
           FSFlags := 0;
-          if GetVolumeInformation(PChar(DriveRoot), VolumeNameBuf, MAX_PATH,
-            @VolSerial, MaxCompLen, FSFlags, FileSystemBuf, MAX_PATH) then
+          if (DriveTypeVal <> DRIVE_REMOTE) and
+            GetVolumeInformation(PChar(DriveRoot), VolumeNameBuf, MAX_PATH,
+              @VolSerial, MaxCompLen, FSFlags, FileSystemBuf, MAX_PATH) then
           begin
             DiskInfoRec.VolumeName := VolumeNameBuf;
             DiskInfoRec.FileSystem := FileSystemBuf;
@@ -2016,7 +2026,8 @@ begin
           // Get disk space
           FreeBytesVal := 0;
           TotalBytesVal := 0;
-          GetDiskFreeSpaceEx(PChar(DriveRoot), FreeBytesVal, TotalBytesVal, nil);
+          if DriveTypeVal <> DRIVE_REMOTE then
+            GetDiskFreeSpaceEx(PChar(DriveRoot), FreeBytesVal, TotalBytesVal, nil);
           DiskInfoRec.TotalBytes := TotalBytesVal;
           DiskInfoRec.FreeBytes := FreeBytesVal;
 
@@ -2889,6 +2900,7 @@ begin
 
   FShutdown := False;
   FShutdownEvent := TEvent.Create(nil, True, False, '');
+  FPersistEvent := TEvent.Create(nil, False, False, '');
   FEnabled := True;
   {$IFDEF MSWINDOWS}
   FFileCounter := GetTickCount64;
@@ -2960,6 +2972,13 @@ begin
   FShipperThread.FreeOnTerminate := False;
   FShipperThread.Start;
 
+  // Background persist thread: writes the buffer to disk when an error or the
+  // startup event asks for it, so the caller never waits for the disk and a slow
+  // upload on the shipper thread cannot delay the write.
+  FPersistThread := TThread.CreateAnonymousThread(PersistThreadExecute);
+  FPersistThread.FreeOnTerminate := False;
+  FPersistThread.Start;
+
   // Queue device info to be sent (with retry on failure)
   QueueDeviceInfo;
 
@@ -2979,6 +2998,9 @@ begin
   else
     StartupMsg := 'Application started';
   Log(llInfo, StartupMsg, 'exewatch', StartupData);
+  // The first record of a run must survive a crash in its first seconds.
+  if FConfig.CustomerId <> '' then
+    FPersistEvent.SetEvent;
 end;
 
 destructor TExeWatch.Destroy;
@@ -3065,6 +3087,7 @@ begin
   FInternalLogLock.Free;
   FAPITraceLock.Free;
   FShutdownEvent.Free;
+  FPersistEvent.Free;
   inherited;
 end;
 
@@ -3095,7 +3118,8 @@ begin
       // Only purge pending data files, not internal logs or traces
       if not (FilePath.EndsWith(EXEWATCH_LOG_FILE_EXTENSION) or
               FilePath.EndsWith(EXEWATCH_DEVICE_FILE_EXTENSION) or
-              FilePath.EndsWith(EXEWATCH_METRIC_FILE_EXTENSION)) then
+              FilePath.EndsWith(EXEWATCH_METRIC_FILE_EXTENSION) or
+              FilePath.EndsWith(EXEWATCH_TEMP_EXTENSION)) then
         Continue;
 
       FileAge := TFile.GetCreationTime(FilePath);
@@ -3563,7 +3587,7 @@ var
   FileContent: TJSONObject;
   EventsArray: TJSONArray;
   Event: TLogEvent;
-  FileName: string;
+  FileName, TempName: string;
   I: Integer;
 begin
   // Don't persist if customer_id is not set - logs would be rejected by server
@@ -3594,17 +3618,19 @@ begin
       EventsArray.AddElement(Event.ToJSON);
     FileContent.AddPair('events', EventsArray);
 
-    // Write to file atomically (write to temp, then rename)
+    // Write to a temp name, then rename: a process killed mid-write leaves no
+    // truncated .ewlog for the next run to throw away as invalid JSON.
     FileName := GetNextFileName;
-    TFile.WriteAllText(FileName, FileContent.ToJSON, TEncoding.UTF8);
+    TempName := FileName + EXEWATCH_TEMP_EXTENSION;
+    TFile.WriteAllText(TempName, FileContent.ToJSON, TEncoding.UTF8);
+    TFile.Move(TempName, FileName);
   finally
     FileContent.Free;
+    // Free ExtraData TJSONObjects from the copied events, also when the write failed
+    for I := 0 to Length(Events) - 1 do
+      if Events[I].ExtraData <> nil then
+        Events[I].ExtraData.Free;
   end;
-
-  // Free ExtraData TJSONObjects from the copied events
-  for I := 0 to Length(Events) - 1 do
-    if Events[I].ExtraData <> nil then
-      Events[I].ExtraData.Free;
 end;
 
 function TExeWatch.RemoveInvalidEventsFromFile(const AFilePath, AResponseJson: string): Boolean;
@@ -4049,6 +4075,22 @@ begin
   end;
 end;
 
+procedure TExeWatch.PersistThreadExecute;
+begin
+  while not FShutdown do
+  begin
+    FPersistEvent.WaitFor;
+    if FShutdown then
+      Break;
+    try
+      PersistBuffer;
+    except
+      on E: Exception do
+        WriteInternalLog('ERROR | PersistBuffer failed on the persist thread: ' + E.Message);
+    end;
+  end;
+end;
+
 procedure TExeWatch.ShipperThreadExecute;
 var
   PendingFiles: TArray<string>;
@@ -4322,6 +4364,8 @@ procedure TExeWatch.Log(ALevel: TEWLogLevel; const AMessage, ATag: string;
 var
   Event: TLogEvent;
   ShouldPersist: Boolean;
+  PersistAsync: Boolean;
+  NowTick: UInt64;
   BuiltExtraData: TJSONObject;
   IncludeBreadcrumbs: Boolean;
   IsErrorLevel: Boolean;
@@ -4345,8 +4389,11 @@ begin
 
   IsErrorLevel := ALevel in [llError, llFatal];
 
-  // Apply min_level filtering from server (errors and fatal always bypass)
-  if not IsErrorLevel and (Ord(ALevel) < Ord(GetEffectiveMinLevel)) then
+  // Apply min_level filtering from server. Error and fatal used to bypass this,
+  // which turned the console's "Minimum Level" into a suggestion: a customer who
+  // picked Fatal kept sending, and paying for, every Error. Sampling below still
+  // spares them, which is a separate setting.
+  if Ord(ALevel) < Ord(GetEffectiveMinLevel) then
   begin
     AExtraData.Free;
     Exit;
@@ -4405,12 +4452,41 @@ begin
   try
     FBuffer.Add(Event);
     ShouldPersist := FBuffer.Count >= EffectiveBatchSize;
+    PersistAsync := False;
+    // An error or fatal can be the last thing the process records before it dies:
+    // it has the persist thread write the whole buffer now instead of waiting for
+    // the timer, and the caller does not wait for the disk. At most once per
+    // second (the first error of a burst), so a burst does not become a burst of
+    // files. The rest waits for the timer.
+    if IsErrorLevel and not ShouldPersist and (FConfig.CustomerId <> '') then
+    begin
+      {$IFDEF MSWINDOWS}
+      NowTick := GetTickCount64;
+      {$ELSE}
+      NowTick := TThread.GetTickCount;
+      {$ENDIF}
+      if NowTick - FLastErrorPersistTick >= EXEWATCH_ERROR_PERSIST_MIN_GAP_MS then
+      begin
+        FLastErrorPersistTick := NowTick;
+        PersistAsync := True;
+      end;
+    end;
   finally
     FBufferLock.Leave;
   end;
 
+  if PersistAsync then
+    FPersistEvent.SetEvent;
+
+  // Logging must never raise into the host; an error is often logged from inside
+  // the host's own handler.
   if ShouldPersist then
+  try
     PersistBuffer;
+  except
+    on E: Exception do
+      WriteInternalLog('ERROR | PersistBuffer failed in Log: ' + E.Message);
+  end;
 end;
 
 procedure TExeWatch.Debug(const AMessage, ATag: string);
@@ -4542,11 +4618,17 @@ begin
 
   FShutdown := True;
   FShutdownEvent.SetEvent;
+  FPersistEvent.SetEvent;
 
   if FShipperThread <> nil then
   begin
     FShipperThread.WaitFor;
     FreeAndNil(FShipperThread);
+  end;
+  if FPersistThread <> nil then
+  begin
+    FPersistThread.WaitFor;
+    FreeAndNil(FPersistThread);
   end;
 end;
 
@@ -5384,6 +5466,8 @@ begin
   // Check if customer_id actually changed (and wasn't empty before)
   CustomerIdChanged := (FConfig.CustomerId <> ACustomerId) and (FConfig.CustomerId <> '');
   FConfig.CustomerId := ACustomerId;
+  // Events logged while it was empty could not be persisted: do it now
+  FPersistEvent.SetEvent;
 
   // If customer_id changed, re-send device info with new customer_id
   // (new customer_id = new device record in backend, need complete info)
