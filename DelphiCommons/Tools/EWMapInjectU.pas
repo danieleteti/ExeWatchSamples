@@ -340,7 +340,6 @@ begin
   // meanwhile and is refused instead of overwritten.
   ExistingVA := 0;
   ExistingRawPtr := 0;
-  ExistingRawSz := 0;
   OwnsTail := False;
   for I := 0 to Layout.NumSections - 1 do
   begin
