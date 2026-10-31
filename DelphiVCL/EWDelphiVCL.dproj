@@ -1162,10 +1162,6 @@
     </BorlandProject>
     <ProjectFileVersion>12</ProjectFileVersion>
   </ProjectExtensions>
-  <PropertyGroup>
-    <!-- ExeWatch: link the .map into the built binary (resource EXEWATCH_MAP) -->
-    <PostBuildEvent>..\DelphiCommons\Tools\EWMapInject.exe "$(DCC_ExeOutput)\EWDelphiVCL.exe" "$(DCC_ExeOutput)\EWDelphiVCL.map"</PostBuildEvent>
-  </PropertyGroup>
   <Import Project="$(BDS)\Bin\CodeGear.Delphi.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Delphi.Targets')" />
   <Import Project="$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj" Condition="Exists('$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj')" />
   <Import Project="$(MSBuildProjectName).deployproj" Condition="Exists('$(MSBuildProjectName).deployproj')" />
