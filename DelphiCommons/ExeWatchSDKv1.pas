@@ -46,7 +46,7 @@ uses
   System.Diagnostics;  // For TStopwatch (high-precision timing)
 
 const
-  EXEWATCH_SDK_VERSION = '0.24.1';
+  EXEWATCH_SDK_VERSION = '0.25.0';
   EXEWATCH_API_VERSION = 'v1';  // API version this SDK targets
   {$IF NOT DEFINED(LOCAL_EXEWATCH)}
   EXEWATCH_ENDPOINT = 'https://exewatch.com';
@@ -835,6 +835,21 @@ function GetNoStackTraceReason: Integer;
 // return an empty string, and the compiler should say so.
 function GetLastExceptionStackTrace(E: Exception): string;
 
+{$IFDEF MSWINDOWS}
+type
+  /// <summary>
+  ///   The module an address belongs to: handle, load base, image size and
+  ///   base file name. Module=0 means no loaded module owns the address.
+  /// </summary>
+  TSTModuleInfo = record
+    Module: THandle;
+    Base: NativeUInt;
+    SizeOfImage: Cardinal;
+    ModuleName: string;
+  end;
+
+{$ENDIF}
+
 {$IFDEF EXEWATCH_TESTING}
 function EWGetStackTraceStr(FramesToSkip: Integer = 0): string;
 {$IFDEF MSWINDOWS}
@@ -847,9 +862,9 @@ function EWGetStackTraceStr(FramesToSkip: Integer = 0): string;
 /// </summary>
 procedure EWTestResetStackTraceInit(AYieldBeforeClaim: Boolean);
 /// <summary>
-///   Highest number of threads that were ever inside STLoadMap at the same
-///   time. Above 1 means two threads were freeing and regrowing the same
-///   arrays under each other.
+///   Highest number of threads that were ever inside the symbol-table build
+///   for the same module at the same time. Above 1 means two threads were
+///   freeing and regrowing the same arrays under each other.
 /// </summary>
 function EWTestMaxConcurrentMapLoads: Integer;
 /// <summary>
@@ -859,6 +874,34 @@ function EWTestMaxConcurrentMapLoads: Integer;
 /// </summary>
 procedure EWTestSeedSymbols(ACount: Integer; AStep: NativeUInt; ACodeBase: NativeUInt);
 function EWTestFindSymbol(AAddress: NativeUInt): string;
+/// <summary>
+///   Exposed for the test project only: the module attribution used to decide
+///   which symbol table answers for a frame.
+/// </summary>
+function EWTestModuleInfoForAddress(AAddress: NativeUInt): TSTModuleInfo;
+/// <summary>
+///   Exposed for the test project only: the full per-frame resolution the
+///   traces go through (module table, exports, module+offset).
+/// </summary>
+function EWTestResolveAddress(AAddress: NativeUInt): string;
+/// <summary>
+///   Exposed for the test project only: counts the public symbols inside the
+///   EXEWATCH_MAP resource of a module (0 = no usable resource there).
+/// </summary>
+function EWTestCountEmbeddedMapSymbols(AModule: THandle): Integer;
+/// <summary>
+///   Exposed for the test project only: the runtime's own symbol-text reader
+///   for a module (resource first, .map file second), so a test can prove
+///   which source a resolution would come from.
+/// </summary>
+function EWTestModuleText(AModule: THandle): string;
+{$IFDEF CPUX86}
+/// <summary>
+///   Exposed for the test project only: the CALL-instruction size detector
+///   the Win32 walk uses to correct call sites.
+/// </summary>
+function EWTestCallSiteSize(AReturnAddress: NativeUInt): Cardinal;
+{$ENDIF}
 /// <summary>
 ///   Exposed for the test project only. Drives the real restore path with a
 ///   probe: the finalization runs at process exit, after the last test has
@@ -1041,7 +1084,7 @@ var
   GOldCleanUpStackInfoProc: procedure(Info: Pointer) = nil;
 
 // Returns Info as ours, or nil when it belongs to another stack-trace provider
-// that installed itself after us (madExcept and friends).
+// that installed itself after us (other exception-reporting libraries).
 function EWStackInfoOf(Info: Pointer): PEWStackInfo;
 begin
   if (Info <> nil) and (PEWStackInfo(Info)^.Signature = EW_STACKINFO_SIGNATURE) then
@@ -1049,6 +1092,10 @@ begin
   else
     Result := nil;
 end;
+
+{$IFDEF MSWINDOWS}
+function GetExceptionTraceStr(AExceptAddr: Pointer): string; forward;
+{$ENDIF}
 
 function ExeWatchGetExceptionStackInfo(P: System.PExceptionRecord): Pointer;
 var
@@ -1058,7 +1105,7 @@ begin
   Info^.Signature := EW_STACKINFO_SIGNATURE;
   Info^.Inner := nil;
   try
-    Info^.Trace := GetStackTraceStr(0);
+    Info^.Trace := GetExceptionTraceStr(P^.ExceptionAddress);
     if Assigned(GOldGetExceptionStackInfoProc) then
       Info^.Inner := GOldGetExceptionStackInfoProc(P);
   except
@@ -5791,7 +5838,7 @@ end;
 
 const
   ST_MAX_FRAMES = 62;
-  // STEnsureInit publishes the symbol table only once it is complete. Two
+  // The symbol table for a module is published only once it is complete. Two
   // threads used to pass the flag check together and both load, each freeing
   // and regrowing the arrays under the other.
   ST_INIT_IDLE = 0;
@@ -5802,6 +5849,14 @@ const
   // resolve anything more than 16 MB past the module base - a real limit for a
   // large executable, and invisible when it bites.
   ST_ADDR_SLACK = $10000;
+  // The .map is linked INTO the executable as this RCDATA resource (the
+  // EWMapInject tool and the ExeWatchMapExpert IDE expert do that at build
+  // time); an external .map file beside the module only backs it up during
+  // development.
+  EW_MAP_RESOURCE_NAME = 'EXEWATCH_MAP';
+  // GetModuleHandleEx is not part of Winapi.Windows: local import constants.
+  EW_GMHE_UNCHANGED_REFCOUNT = $2;
+  EW_GMHE_FROM_ADDRESS = $4;
 
 type
   TSTSymbol = record
@@ -5815,18 +5870,86 @@ type
     UnitName: string;
   end;
 
+  // One symbol table per module: frames are attributed to the module that
+  // contains them, so a frame inside a DLL never resolves against the host
+  // map and vice versa. Immutable once built; entries keep living for the
+  // whole process, so a lookup that got the pointer out of the cache can use
+  // it without holding the lock.
+  TSTModuleSymbols = class
+  private
+    FSymbolCount: Integer;
+    FLineCount: Integer;
+  public
+    // True while the table is being built outside the lock: readers that hit
+    // the placeholder give up their trace (Loaded=False) instead of waiting
+    // on the raiser path.
+    Building: Boolean;
+    Module: THandle;
+    Base: NativeUInt;
+    SizeOfImage: Cardinal;
+    ProgramName: string;
+    SegOffsets: TArray<NativeUInt>;
+    SegCount: Integer;
+    Symbols: TArray<TSTSymbol>;
+    Lines: TArray<TSTLineInfo>;
+    Loaded: Boolean;
+    procedure SetSegOffset(ASeg: Integer; AOffset: NativeUInt);
+    function GetSegOffset(ASeg: Integer): NativeUInt;
+    procedure AddSymbol(AAddress: NativeUInt; const AName: string);
+    procedure AddLine(AAddress: NativeUInt; ALine: Integer; const AUnitName: string);
+    procedure ShrinkAndSort;
+    function FindSymbol(AAddress: NativeUInt): string;
+    procedure FindLine(AAddress: NativeUInt; out ALine: Integer; out AUnit: string);
+  end;
+
+type
+  TRtlCaptureStackBackTrace = function(
+    FramesToSkip, FramesToCapture: ULONG;
+    BackTrace: Pointer; BackTraceHash: PULONG): USHORT; stdcall;
+
+function GetModuleHandleExW(dWFlags: DWORD; lpModuleName: LPCWSTR;
+  var phModule: HMODULE): BOOL; stdcall; external kernel32 name 'GetModuleHandleExW';
+
+type
+  // One entry per exported function, sorted by RVA for the nearest-below
+  // binary search.
+  TSTExportEntry = record
+    RVA: NativeUInt;
+    Name: string;
+  end;
+  TSTExportTable = array of TSTExportEntry;
+
+  // Word/Cardinal arrays to walk the export directory in place (the RTL has
+  // no typed aliases for these).
+  TSTCardinalArray = array [0..(MaxInt - $F) div SizeOf(Cardinal) - 1] of Cardinal;
+  PSTCardinalArray = ^TSTCardinalArray;
+  TSTWordArray = array [0..(MaxInt - $F) div SizeOf(Word) - 1] of Word;
+  PSTWordArray = ^TSTWordArray;
+
+type
+  // One cached export table of a module, for the stale check on reloaded
+  // handles.
+  TSTExportCache = class
+  public
+    Base: NativeUInt;
+    SizeOfImage: Cardinal;
+    Table: TSTExportTable;
+  end;
+
 var
-  GSTSymbols: array of TSTSymbol;
-  GSTLines: array of TSTLineInfo;
-  GSTCodeBase: NativeUInt;
-  GSTSegOffsets: array[1..8] of NativeUInt;
-  GSTSegCount: Integer;
-  GSTLoaded: Boolean;
+  // One entry per module, negative results included (Loaded=False): a module
+  // with no symbols at all must not re-attempt its build for every frame.
+  GSTModuleSymbols: TDictionary<THandle, TSTModuleSymbols>;
+  GSTModuleSymbolsLock: TCriticalSection;
+  // Export tables keyed per module handle (validated against the mounted
+  // image size at every lookup: handles are recycled), negative results
+  // (empty tables) included: parse once, binary search thereafter.
+  GSTExportTables: TDictionary<THandle, TSTExportCache>;
+  GSTHostInfo: TSTModuleInfo;
   GSTInitState: Integer;  // ST_INIT_* - touched only through TInterlocked
-  GSTProgramName: string;
 {$IFDEF EXEWATCH_TESTING}
-  // Counts threads inside STLoadMap. More than one at a time IS the defect,
-  // and is what the regression test asserts against.
+  // Counts threads inside a symbol-table build. More than one at a time IS
+  // the defect, and is what the regression test asserts against.
   GSTLoadInFlight: Integer;
   GSTLoadInFlightMax: Integer;
   // Widens the window between reading the state and claiming it, so the race
@@ -5834,19 +5957,72 @@ var
   GSTTestYieldBeforeClaim: Boolean;
 {$ENDIF}
 
-type
-  TRtlCaptureStackBackTrace = function(
-    FramesToSkip, FramesToCapture: ULONG;
-    BackTrace: Pointer; BackTraceHash: PULONG): USHORT; stdcall;
-
 var
   GSTCapture: TRtlCaptureStackBackTrace = nil;
 
-procedure STSortSymbols;
+procedure TSTModuleSymbols.SetSegOffset(ASeg: Integer; AOffset: NativeUInt);
 begin
-  if Length(GSTSymbols) > 1 then
-    TArray.Sort<TSTSymbol>(GSTSymbols, TComparer<TSTSymbol>.Construct(
+  if ASeg < 1 then
+    Exit;
+  if ASeg > Length(SegOffsets) then
+    SetLength(SegOffsets, ASeg);  // elements Delphi has not filled yet stay 0
+  if ASeg > SegCount then
+    SegCount := ASeg;
+  SegOffsets[ASeg - 1] := AOffset;
+end;
+
+function TSTModuleSymbols.GetSegOffset(ASeg: Integer): NativeUInt;
+begin
+  if (ASeg >= 1) and (ASeg <= Length(SegOffsets)) then
+    Result := SegOffsets[ASeg - 1]
+  else
+    Result := 0;
+end;
+
+procedure TSTModuleSymbols.AddSymbol(AAddress: NativeUInt; const AName: string);
+begin
+  if FSymbolCount >= Length(Symbols) then
+  begin
+    if Length(Symbols) = 0 then
+      SetLength(Symbols, 1024)
+    else
+      SetLength(Symbols, Length(Symbols) * 2);
+  end;
+  Symbols[FSymbolCount].Address := AAddress;
+  Symbols[FSymbolCount].Name := AName;
+  Inc(FSymbolCount);
+end;
+
+procedure TSTModuleSymbols.AddLine(AAddress: NativeUInt; ALine: Integer; const AUnitName: string);
+begin
+  if FLineCount >= Length(Lines) then
+  begin
+    if Length(Lines) = 0 then
+      SetLength(Lines, 4096)
+    else
+      SetLength(Lines, Length(Lines) * 2);
+  end;
+  Lines[FLineCount].Address := AAddress;
+  Lines[FLineCount].Line := ALine;
+  Lines[FLineCount].UnitName := AUnitName;
+  Inc(FLineCount);
+end;
+
+procedure TSTModuleSymbols.ShrinkAndSort;
+begin
+  SetLength(Symbols, FSymbolCount);
+  SetLength(Lines, FLineCount);
+  if Length(Symbols) > 1 then
+    TArray.Sort<TSTSymbol>(Symbols, TComparer<TSTSymbol>.Construct(
       function(const A, B: TSTSymbol): Integer
+      begin
+        if A.Address < B.Address then Result := -1
+        else if A.Address > B.Address then Result := 1
+        else Result := 0;
+      end));
+  if Length(Lines) > 1 then
+    TArray.Sort<TSTLineInfo>(Lines, TComparer<TSTLineInfo>.Construct(
+      function(const A, B: TSTLineInfo): Integer
       begin
         if A.Address < B.Address then Result := -1
         else if A.Address > B.Address then Result := 1
@@ -5854,16 +6030,66 @@ begin
       end));
 end;
 
-procedure STSortLines;
+function TSTModuleSymbols.FindSymbol(AAddress: NativeUInt): string;
+var
+  Lo, Hi, Mid, Found: Integer;
+  RelAddr: NativeUInt;
 begin
-  if Length(GSTLines) > 1 then
-    TArray.Sort<TSTLineInfo>(GSTLines, TComparer<TSTLineInfo>.Construct(
-      function(const A, B: TSTLineInfo): Integer
-      begin
-        if A.Address < B.Address then Result := -1
-        else if A.Address > B.Address then Result := 1
-        else Result := 0;
-      end));
+  Result := '';
+  if (Length(Symbols) = 0) or (AAddress < Base) then Exit;
+  RelAddr := AAddress - Base;
+  // Bounded by what the map actually covers, not by a flat 16 MB.
+  if RelAddr > Symbols[High(Symbols)].Address + ST_ADDR_SLACK then Exit;
+  // Sorted ascending by ShrinkAndSort, so the last entry <= RelAddr is found
+  // by halving instead of by walking. This runs for every frame of every
+  // exception, and a large map holds ~10^6 entries.
+  Lo := 0;
+  Hi := High(Symbols);
+  Found := -1;
+  while Lo <= Hi do
+  begin
+    Mid := Lo + (Hi - Lo) div 2;
+    if Symbols[Mid].Address <= RelAddr then
+    begin
+      Found := Mid;
+      Lo := Mid + 1;
+    end
+    else
+      Hi := Mid - 1;
+  end;
+  if Found >= 0 then
+    Result := Symbols[Found].Name;
+end;
+
+procedure TSTModuleSymbols.FindLine(AAddress: NativeUInt; out ALine: Integer; out AUnit: string);
+var
+  Lo, Hi, Mid, Found: Integer;
+  RelAddr: NativeUInt;
+begin
+  ALine := 0;
+  AUnit := '';
+  if (Length(Lines) = 0) or (AAddress < Base) then Exit;
+  RelAddr := AAddress - Base;
+  if RelAddr > Lines[High(Lines)].Address + ST_ADDR_SLACK then Exit;
+  Lo := 0;
+  Hi := High(Lines);
+  Found := -1;
+  while Lo <= Hi do
+  begin
+    Mid := Lo + (Hi - Lo) div 2;
+    if Lines[Mid].Address <= RelAddr then
+    begin
+      Found := Mid;
+      Lo := Mid + 1;
+    end
+    else
+      Hi := Mid - 1;
+  end;
+  if Found >= 0 then
+  begin
+    ALine := Lines[Found].Line;
+    AUnit := Lines[Found].UnitName;
+  end;
 end;
 
 function STHexToNative(const S: string): NativeUInt;
@@ -5875,14 +6101,6 @@ begin
     Result := 0
   else
     Result := StrToInt64Def('$' + T, 0);
-end;
-
-function STSegOffset(SegNum: Integer): NativeUInt;
-begin
-  if (SegNum >= 1) and (SegNum <= GSTSegCount) then
-    Result := GSTSegOffsets[SegNum]
-  else
-    Result := 0;
 end;
 
 procedure STParseAddr(const S: string; out SegNum: Integer; out Addr: NativeUInt);
@@ -5902,32 +6120,6 @@ begin
   end;
 end;
 
-procedure STGrowSymbols(var ACount: Integer);
-var
-  NewCap: Integer;
-begin
-  if ACount >= Length(GSTSymbols) then
-  begin
-    NewCap := Length(GSTSymbols);
-    if NewCap = 0 then NewCap := 1024
-    else NewCap := NewCap * 2;
-    SetLength(GSTSymbols, NewCap);
-  end;
-end;
-
-procedure STGrowLines(var ACount: Integer);
-var
-  NewCap: Integer;
-begin
-  if ACount >= Length(GSTLines) then
-  begin
-    NewCap := Length(GSTLines);
-    if NewCap = 0 then NewCap := 4096
-    else NewCap := NewCap * 2;
-    SetLength(GSTLines, NewCap);
-  end;
-end;
-
 // Extract next whitespace-delimited token from S starting at Pos (1-based).
 // Returns empty string if no more tokens. Updates Pos past the token.
 function STNextToken(const S: string; var P: Integer): string;
@@ -5943,7 +6135,10 @@ begin
   Result := Copy(S, Start, P - Start);
 end;
 
-procedure STLoadMap(const FileName: string);
+// Parses the Borland map text of ONE module into AOut: segments, publics by
+// value and line numbers, all module-relative. The caller already has the
+// text in memory (resource or file), so nothing here touches disk.
+procedure STBuildSymbols(const AText: string; AOut: TSTModuleSymbols);
 var
   SL: TStringList;
   I, K, P: Integer;
@@ -5951,29 +6146,10 @@ var
   EmptyCount, LineNum: Integer;
   BaseAddr: NativeUInt;
   SegNum: Integer;
-  SymCount, LineCount: Integer;
 begin
-{$IFDEF EXEWATCH_TESTING}
-  if TInterlocked.Increment(GSTLoadInFlight) > GSTLoadInFlightMax then
-    GSTLoadInFlightMax := GSTLoadInFlight;
-  try
-{$ENDIF}
-  GSTLoaded := False;
-  SetLength(GSTSymbols, 0);
-  SetLength(GSTLines, 0);
-  FillChar(GSTSegOffsets, SizeOf(GSTSegOffsets), 0);
-  GSTSegCount := 0;
-  GSTProgramName := ChangeFileExt(ExtractFileName(FileName), '');
-
-  if not FileExists(FileName) then
-    Exit;
-
-  SymCount := 0;
-  LineCount := 0;
-
   SL := TStringList.Create;
   try
-    SL.LoadFromFile(FileName);
+    SL.Text := AText;
     I := 0;
     while I < SL.Count do
     begin
@@ -5992,15 +6168,14 @@ begin
           Tok2 := STNextToken(Line, P);
           Tok3 := STNextToken(Line, P);
           Tok4 := STNextToken(Line, P);
-          if (Tok4 = 'CODE') or (Tok4 = 'ICODE') then
+          if (Tok1 <> '') and (Tok4 <> '') then
           begin
             STParseAddr(Tok1, SegNum, BaseAddr);
-            if (SegNum >= 1) and (SegNum <= High(GSTSegOffsets)) then
-            begin
-              GSTSegOffsets[SegNum] := BaseAddr and $FFFFF;
-              if SegNum > GSTSegCount then
-                GSTSegCount := SegNum;
-            end;
+            if SegNum >= 1 then
+              // Every segment gets its offset, not only CODE/ICODE: publics
+              // of data segments stored without it landed at tiny addresses
+              // and made low addresses resolve to the wrong symbol.
+              AOut.SetSegOffset(SegNum, BaseAddr and $FFFFF);
           end;
           Inc(I);
         end;
@@ -6032,12 +6207,7 @@ begin
           begin
             STParseAddr(Tok1, SegNum, BaseAddr);
             if SegNum > 0 then
-            begin
-              STGrowSymbols(SymCount);
-              GSTSymbols[SymCount].Address := BaseAddr + STSegOffset(SegNum);
-              GSTSymbols[SymCount].Name := Tok2;
-              Inc(SymCount);
-            end;
+              AOut.AddSymbol(BaseAddr + AOut.GetSegOffset(SegNum), Tok2);
           end;
           Inc(I);
         end;
@@ -6076,13 +6246,7 @@ begin
             begin
               STParseAddr(Tok2, SegNum, BaseAddr);
               if SegNum > 0 then
-              begin
-                STGrowLines(LineCount);
-                GSTLines[LineCount].Address := BaseAddr + STSegOffset(SegNum);
-                GSTLines[LineCount].Line := LineNum;
-                GSTLines[LineCount].UnitName := UnitName;
-                Inc(LineCount);
-              end;
+                AOut.AddLine(BaseAddr + AOut.GetSegOffset(SegNum), LineNum, UnitName);
             end;
           end;
           Inc(I);
@@ -6093,15 +6257,168 @@ begin
       Inc(I);
     end;
 
-    // Trim to actual size
-    SetLength(GSTSymbols, SymCount);
-    SetLength(GSTLines, LineCount);
-
-    STSortSymbols;
-    STSortLines;
-    GSTLoaded := True;
+    AOut.ShrinkAndSort;
+    AOut.Loaded := True;
   finally
     SL.Free;
+  end;
+end;
+
+// Which loaded module owns this address. GetModuleHandleEx is not declared in
+// Winapi.Windows, so it is imported above; UNCHANGED_REFCOUNT keeps the
+// lookup allocation-free and the handle valid for the process lifetime.
+function STModuleInfoForAddress(AAddress: NativeUInt): TSTModuleInfo;
+var
+  H: HMODULE;
+  FileName: string;
+  DosHeader: PImageDosHeader;
+  Nt32: PImageNtHeaders32;
+  Nt64: PImageNtHeaders64;
+const
+  ST_MODULE_FLAGS = EW_GMHE_UNCHANGED_REFCOUNT or EW_GMHE_FROM_ADDRESS;
+begin
+  Result.Module := 0;
+  Result.Base := 0;
+  Result.SizeOfImage := 0;
+  Result.ModuleName := '';
+  if AAddress = 0 then
+    Exit;
+  if not GetModuleHandleExW(ST_MODULE_FLAGS, LPCWSTR(AAddress), H) then
+    Exit;
+  Result.Module := H;
+  Result.Base := NativeUInt(H);
+  FileName := GetModuleName(H);
+  Result.ModuleName := ExtractFileName(FileName);
+  DosHeader := PImageDosHeader(Result.Base);
+  if DosHeader^.e_magic <> IMAGE_DOS_SIGNATURE then
+    Exit;
+  Nt32 := PImageNtHeaders32(Result.Base + NativeUInt(DosHeader^._lfanew));
+  if Nt32^.Signature <> IMAGE_NT_SIGNATURE then
+    Exit;
+  case Nt32^.OptionalHeader.Magic of
+    IMAGE_NT_OPTIONAL_HDR32_MAGIC:
+      begin
+        Result.SizeOfImage := Nt32^.OptionalHeader.SizeOfImage;
+        Exit;
+      end;
+    IMAGE_NT_OPTIONAL_HDR64_MAGIC:
+      begin
+        Nt64 := PImageNtHeaders64(Result.Base + NativeUInt(DosHeader^._lfanew));
+        Result.SizeOfImage := Nt64^.OptionalHeader.SizeOfImage;
+      end;
+  end;
+end;
+
+// Symbol text a module carries with it: first the RCDATA resource the build
+// linked in, then the plain .map file beside the module (development builds).
+function STSymbolTextForModule(AModule: THandle): string;
+var
+  ResInfo: HRSRC;
+  ResLoad: HGLOBAL;
+  ResPtr: Pointer;
+  ResSize: Integer;
+  MapFile: string;
+  Bytes: TBytes;
+begin
+  Result := '';
+  if AModule = 0 then
+    Exit;
+  ResInfo := FindResource(AModule, EW_MAP_RESOURCE_NAME, RT_RCDATA);
+  if ResInfo <> 0 then
+  begin
+    ResLoad := LoadResource(AModule, ResInfo);
+    ResSize := SizeOfResource(AModule, ResInfo);
+    if (ResLoad <> 0) and (ResSize > 0) then
+    begin
+      ResPtr := LockResource(ResLoad);
+      if ResPtr <> nil then
+      begin
+        SetLength(Bytes, ResSize);
+        Move(ResPtr^, Bytes[0], ResSize);
+        Result := TEncoding.Default.GetString(Bytes);
+      end;
+    end;
+  end;
+  if Result <> '' then
+    Exit;
+  MapFile := ChangeFileExt(GetModuleName(AModule), '.map');
+  if FileExists(MapFile) then
+  begin
+    try
+      // A plain file read: this is the only disk access in the whole
+      // resolution path, and it happens once per module, at first use.
+      Result := TFile.ReadAllText(MapFile);
+    except
+      // An unreadable map must not turn a missing trace into a crash.
+      Result := '';
+    end;
+  end;
+end;
+
+// A cached entry answers for the module mounted at that address NOW: module
+// handles are load addresses and get recycled after a FreeLibrary, so a hit
+// whose image size no longer matches the mounted image is stale and gets
+// rebuilt. A SizeOfImage of 0 (seeded tables) accepts anything.
+function STEntryUsable(AEntry: TSTModuleSymbols; const AInfo: TSTModuleInfo): Boolean;
+begin
+  Result := (AEntry <> nil) and (not AEntry.Building) and
+    ((AEntry.SizeOfImage = 0) or (AInfo.SizeOfImage = 0) or
+     (AEntry.SizeOfImage = AInfo.SizeOfImage));
+end;
+
+// Loads (or takes from cache) the symbol table for a module. The BUILD runs
+// outside every lock: it is once-per-module work of up to seconds (12 MB of
+// map text is split and sorted), and the callers sit inside the raise path -
+// one thread must never park other threads' exceptions behind it. A
+// placeholder entry claims the build per module; a thread that hits the
+// placeholder gives up its trace this once, exactly like the init path
+// always has.
+function STSymbolsForModule(const AInfo: TSTModuleInfo): TSTModuleSymbols;
+var
+  Text: string;
+begin
+  Result := nil;
+  if (AInfo.Module = 0) or (GSTModuleSymbols = nil) then
+    Exit;
+  GSTModuleSymbolsLock.Acquire;
+  try
+    if GSTModuleSymbols.TryGetValue(AInfo.Module, Result) then
+    begin
+      if Result.Building then
+        Exit;  // a build is in flight: give up, fall back to exports/offset
+      if STEntryUsable(Result, AInfo) then
+        Exit;
+      // Stale: leave the old object to whoever is already holding a pointer
+      // to it and replace the cache entry with a fresh build.
+      Result := nil;
+    end;
+    Result := TSTModuleSymbols.Create;
+    Result.Module := AInfo.Module;
+    Result.Base := AInfo.Base;
+    Result.SizeOfImage := AInfo.SizeOfImage;
+    Result.Building := True;
+    GSTModuleSymbols.AddOrSetValue(AInfo.Module, Result);
+  finally
+    GSTModuleSymbolsLock.Release;
+  end;
+{$IFDEF EXEWATCH_TESTING}
+  if TInterlocked.Increment(GSTLoadInFlight) > GSTLoadInFlightMax then
+    GSTLoadInFlightMax := GSTLoadInFlight;
+  try
+{$ENDIF}
+  // The build itself: no locks held.
+  Text := STSymbolTextForModule(AInfo.Module);
+  if Text <> '' then
+  begin
+    Result.ProgramName := ChangeFileExt(ExtractFileName(AInfo.ModuleName), '');
+    STBuildSymbols(Text, Result);
+  end;
+  Result.Building := False;
+  GSTModuleSymbolsLock.Acquire;
+  try
+    GSTModuleSymbols.AddOrSetValue(AInfo.Module, Result);
+  finally
+    GSTModuleSymbolsLock.Release;
   end;
 {$IFDEF EXEWATCH_TESTING}
   finally
@@ -6110,26 +6427,157 @@ begin
 {$ENDIF}
 end;
 
-function STFindSymbol(Address: NativeUInt): string;
+// Parses the export directory of a module straight out of its mapped image:
+// no file access, only header math. Every structure is checked for extent
+// (start + span within the image) before any element is read, and export
+// names are copied with a scan bounded at the image end - a module the
+// loader never imports from can carry a malformed directory and nothing here
+// is allowed to fault into the raise path.
+function STBuildExportTable(const AInfo: TSTModuleInfo): TSTExportTable;
 var
+  DosHeader: PImageDosHeader;
+  Nt32: PImageNtHeaders32;
+  Nt64: PImageNtHeaders64;
+  ExpRVA: DWORD;
+  Dir: PImageExportDirectory;
+  Names: PSTCardinalArray;
+  Ordinals: PSTWordArray;
+  Functions: PSTCardinalArray;
+  I, Count: Integer;
+  NameRVA, FuncRVA: DWORD;
+  NamePtr: PAnsiChar;
+  InImage: PByte;
+  NulFound: Boolean;
+begin
+  SetLength(Result, 0);
+  if (AInfo.Module = 0) or (AInfo.Base = 0) or (AInfo.SizeOfImage = 0) then
+    Exit;
+  DosHeader := PImageDosHeader(AInfo.Base);
+  if DosHeader^.e_magic <> IMAGE_DOS_SIGNATURE then
+    Exit;
+  Nt32 := PImageNtHeaders32(AInfo.Base + NativeUInt(DosHeader^._lfanew));
+  if Nt32^.Signature <> IMAGE_NT_SIGNATURE then
+    Exit;
+  case Nt32^.OptionalHeader.Magic of
+    IMAGE_NT_OPTIONAL_HDR32_MAGIC:
+      ExpRVA := Nt32^.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    IMAGE_NT_OPTIONAL_HDR64_MAGIC:
+      begin
+        Nt64 := PImageNtHeaders64(AInfo.Base + NativeUInt(DosHeader^._lfanew));
+        ExpRVA := Nt64^.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+      end;
+  else
+    Exit;
+  end;
+  // The whole directory, not just its start address, has to sit in image.
+  if ExpRVA + SizeOf(TImageExportDirectory) > AInfo.SizeOfImage then
+    Exit;
+  Dir := PImageExportDirectory(AInfo.Base + ExpRVA);
+  if (Dir^.NumberOfNames = 0) then
+    Exit;
+  // Span checks: array start + per-element span within the image, and the
+  // functions array bounded by its own declared size.
+  if (Dir^.AddressOfNames + 4 * Dir^.NumberOfNames >= AInfo.SizeOfImage) or
+     (Dir^.AddressOfNameOrdinals + 2 * Dir^.NumberOfNames >= AInfo.SizeOfImage) or
+     (Dir^.NumberOfFunctions > AInfo.SizeOfImage div 4) or
+     (Dir^.AddressOfFunctions + 4 * Dir^.NumberOfFunctions >= AInfo.SizeOfImage) then
+    Exit;
+  Names := Pointer(AInfo.Base + Dir^.AddressOfNames);
+  Ordinals := Pointer(AInfo.Base + Dir^.AddressOfNameOrdinals);
+  Functions := Pointer(AInfo.Base + Dir^.AddressOfFunctions);
+  SetLength(Result, Dir^.NumberOfNames);
+  Count := 0;
+  for I := 0 to Dir^.NumberOfNames - 1 do
+  begin
+    NameRVA := Names^[I];
+    if NameRVA >= AInfo.SizeOfImage then
+      Continue;
+    if Cardinal(Ordinals^[I]) >= Dir^.NumberOfFunctions then
+      Continue;
+    FuncRVA := Functions^[Ordinals^[I]];
+    if FuncRVA >= AInfo.SizeOfImage then
+      Continue;
+    NamePtr := PAnsiChar(AInfo.Base + NameRVA);
+    // Name strings are copied with a bounded scan: a name without a NUL
+    // terminator before the image end is skipped, not chased into memory
+    // outside the module.
+    NulFound := False;
+    InImage := Pointer(AInfo.Base + NameRVA);
+    while NativeUInt(InImage) < AInfo.Base + AInfo.SizeOfImage do
+    begin
+      if InImage^ = 0 then
+      begin
+        NulFound := True;
+        Break;
+      end;
+      Inc(InImage);
+    end;
+    if not NulFound then
+      Continue;
+    Result[Count].RVA := FuncRVA;
+    Result[Count].Name := string(PAnsiChar(AInfo.Base + NameRVA));
+    Inc(Count);
+  end;
+  SetLength(Result, Count);
+  if Length(Result) > 1 then
+    TArray.Sort<TSTExportEntry>(Result, TComparer<TSTExportEntry>.Construct(
+      function(const A, B: TSTExportEntry): Integer
+      begin
+        if A.RVA < B.RVA then Result := -1
+        else if A.RVA > B.RVA then Result := 1
+        else Result := 0;
+      end));
+end;
+
+// Format 'module.dll!Name' (or with +0xOffset) for the exported function the
+// address falls in or after. Empty when the module has no usable exports.
+function STExportNameForAddress(const AInfo: TSTModuleInfo; AAddress: NativeUInt): string;
+var
+  Cache: TSTExportCache;
+  Table: TSTExportTable;
   Lo, Hi, Mid, Found: Integer;
   RelAddr: NativeUInt;
 begin
   Result := '';
-  if (Length(GSTSymbols) = 0) or (Address < GSTCodeBase) then Exit;
-  RelAddr := Address - GSTCodeBase;
-  // Bounded by what the map actually covers, not by a flat 16 MB.
-  if RelAddr > GSTSymbols[High(GSTSymbols)].Address + ST_ADDR_SLACK then Exit;
-  // Sorted ascending by STSortSymbols, so the last entry <= RelAddr is found
-  // by halving instead of by walking. This runs for every frame of every
-  // exception, and a large map holds ~10^6 entries.
+  if (AInfo.Module = 0) or (GSTExportTables = nil) then
+    Exit;
+  GSTModuleSymbolsLock.Acquire;
+  try
+    Cache := nil;
+    if GSTExportTables.TryGetValue(AInfo.Module, Cache) then
+    begin
+      // Handles are recycled: a cached table must still describe the image
+      // mounted now (same trick as the symbol tables).
+      if (Cache.Base <> AInfo.Base) or
+         ((AInfo.SizeOfImage <> 0) and (Cache.SizeOfImage <> AInfo.SizeOfImage)) then
+      begin
+        Cache := nil;
+        GSTExportTables.Remove(AInfo.Module);
+      end;
+    end;
+    if Cache = nil then
+    begin
+      Cache := TSTExportCache.Create;
+      Cache.Base := AInfo.Base;
+      Cache.SizeOfImage := AInfo.SizeOfImage;
+      Cache.Table := STBuildExportTable(AInfo);
+      GSTExportTables.AddOrSetValue(AInfo.Module, Cache);
+    end;
+    Table := Cache.Table;
+  finally
+    GSTModuleSymbolsLock.Release;
+  end;
+  if (Length(Table) = 0) or (AAddress < AInfo.Base) or
+     (AAddress - AInfo.Base >= AInfo.SizeOfImage) then
+    Exit;
+  RelAddr := AAddress - AInfo.Base;
   Lo := 0;
-  Hi := High(GSTSymbols);
+  Hi := High(Table);
   Found := -1;
   while Lo <= Hi do
   begin
     Mid := Lo + (Hi - Lo) div 2;
-    if GSTSymbols[Mid].Address <= RelAddr then
+    if Table[Mid].RVA <= RelAddr then
     begin
       Found := Mid;
       Lo := Mid + 1;
@@ -6137,66 +6585,138 @@ begin
     else
       Hi := Mid - 1;
   end;
-  if Found >= 0 then
-    Result := GSTSymbols[Found].Name;
+  if Found < 0 then
+    Exit;
+  if Table[Found].RVA = RelAddr then
+    Result := Format('%s!%s', [AInfo.ModuleName, Table[Found].Name])
+  else
+    Result := Format('%s!%s+0x%x', [AInfo.ModuleName, Table[Found].Name, RelAddr - Table[Found].RVA]);
 end;
 
-procedure STFindLine(Address: NativeUInt; out ALine: Integer; out AUnit: string);
+{$IFDEF CPUX86}
+// Inspects the bytes before a return address and returns the size of the
+// CALL that produced it (0 = nothing that looks like a call): the classic
+// x86 call encodings only, which is what the frame walk runs on. x64 is
+// intentionally left out: the REX prefix heuristics are a different game and
+// nothing here is verified for it.
+function STCallSiteSize(AReturnAddress: NativeUInt): Cardinal;
 var
-  Lo, Hi, Mid, Found: Integer;
-  RelAddr: NativeUInt;
+  CodeDWORD4, CodeDWORD8: DWORD;
+  RM1, RM2, RM5: Byte;
 begin
-  ALine := 0;
-  AUnit := '';
-  if (Length(GSTLines) = 0) or (Address < GSTCodeBase) then Exit;
-  RelAddr := Address - GSTCodeBase;
-  if RelAddr > GSTLines[High(GSTLines)].Address + ST_ADDR_SLACK then Exit;
-  Lo := 0;
-  Hi := High(GSTLines);
-  Found := -1;
-  while Lo <= Hi do
-  begin
-    Mid := Lo + (Hi - Lo) div 2;
-    if GSTLines[Mid].Address <= RelAddr then
-    begin
-      Found := Mid;
-      Lo := Mid + 1;
-    end
-    else
-      Hi := Mid - 1;
-  end;
-  if Found >= 0 then
-  begin
-    ALine := GSTLines[Found].Line;
-    AUnit := GSTLines[Found].UnitName;
-  end;
+  Result := 0;
+  if AReturnAddress <= 8 then
+    Exit;
+  CodeDWORD8 := PDWORD(AReturnAddress - 8)^;
+  CodeDWORD4 := PDWORD(AReturnAddress - 4)^;
+  // CodeDWORD8 = bytes (ReturnAddr-8..ReturnAddr-5), CodeDWORD4 = (ReturnAddr-4..ReturnAddr-1)
+  RM1 := (CodeDWORD4 shr 24) and $7;
+  RM2 := (CodeDWORD4 shr 16) and $7;
+  RM5 := (CodeDWORD8 shr 24) and $7;
+  // The most common CALL variants first
+  if ((CodeDWORD8 and $FF000000) = $E8000000) then
+    // 5 bytes, "CALL NEAR REL32" (E8 cd)
+    Result := 5
+  else if ((CodeDWORD4 and $F8FF0000) = $10FF0000) and not (RM1 in [4, 5]) then
+    // 2 bytes, "CALL NEAR [EAX]" (FF /2) - R/M neither SIB nor disp32
+    Result := 2
+  else if ((CodeDWORD4 and $F8FF0000) = $D0FF0000) then
+    // 2 bytes, "CALL NEAR EAX" (FF /2, Mod=11)
+    Result := 2
+  else if ((CodeDWORD4 and $00FFFF00) = $0014FF00) then
+    // 3 bytes, "CALL NEAR [EAX+EAX*i]" (FF /2, Mod=00, RM=100, SIB not validated)
+    Result := 3
+  else if ((CodeDWORD4 and $00F8FF00) = $0050FF00) and (RM2 <> 4) then
+    // 3 bytes, "CALL NEAR [EAX+$12]" (FF /2, Mod=01, R/M not SIB)
+    Result := 3
+  else if ((CodeDWORD4 and $0000FFFF) = $000054FF) then
+    // 4 bytes, "CALL NEAR [EAX+EAX+$12]" (FF /2, Mod=01, RM=100)
+    Result := 4
+  else if ((CodeDWORD8 and $FFFF0000) = $15FF0000) then
+    // 6 bytes, "CALL NEAR [imm32]" (FF /2, Mod=00, RM=101)
+    Result := 6
+  else if ((CodeDWORD8 and $F8FF0000) = $90FF0000) and (RM5 <> 4) then
+    // 6 bytes, "CALL NEAR [EAX+imm32]" (FF /2, Mod=10, R/M not SIB)
+    Result := 6
+  else if ((CodeDWORD8 and $00FFFF00) = $0094FF00) then
+    // 7 bytes, "CALL NEAR [EAX+EAX*i+imm32]" (FF /2, Mod=10, RM=100)
+    Result := 7
+  else if ((CodeDWORD8 and $0000FF00) = $00009A00) then
+    // 7 bytes, "CALL FAR $1234:$12345678" (9A ptr16:32) - valid only on x86
+    Result := 7
+  else
+    Result := 0;
 end;
+{$ENDIF CPUX86}
+
+// Any resolution failure is contained here: the raise path and the direct
+// Log calls below must receive a line, never an exception of their own.
+function STResolveAddrInner(Address: NativeUInt): string; forward;
 
 function STResolveAddr(Address: NativeUInt): string;
 var
+  Info: TSTModuleInfo;
+begin
+  try
+    Result := STResolveAddrInner(Address);
+  except
+    Info := STModuleInfoForAddress(Address);
+    if Info.Module = 0 then
+      Result := Format('[%p]', [Pointer(Address)])
+    else
+      Result := Format('%s+0x%x', [Info.ModuleName, Address - Info.Base]);
+  end;
+end;
+
+// Does the real work of STResolveAddr; the wrapper above is the containment.
+function STResolveAddrInner(Address: NativeUInt): string;
+var
+  Info: TSTModuleInfo;
+  Syms: TSTModuleSymbols;
   SymName, LineUnit, FuncName: string;
   LineNum: Integer;
 begin
-  SymName := STFindSymbol(Address);
-  STFindLine(Address, LineNum, LineUnit);
-
-  if (LineUnit <> '') and (SymName <> '') and SymName.StartsWith(LineUnit + '.') then
-  begin
-    FuncName := Copy(SymName, Length(LineUnit) + 2, MaxInt);
-    // Win32 Finalization fix
-    if (GSTProgramName <> '') and
-       SameText(LineUnit, GSTProgramName) and
-       SameText(FuncName, 'Finalization') then
-      FuncName := GSTProgramName;
-    if LineNum > 0 then
-      Result := Format('%s.%s (line %d)', [LineUnit, FuncName, LineNum])
-    else
-      Result := Format('%s.%s', [LineUnit, FuncName]);
-  end
-  else if (LineUnit <> '') and (LineNum > 0) then
-    Result := Format('%s (line %d)', [LineUnit, LineNum])
+  Info := STModuleInfoForAddress(Address);
+  if Info.Module = 0 then
+    Result := Format('[%p]', [Pointer(Address)])
   else
-    Result := Format('[%p]', [Pointer(Address)]);
+  begin
+    Syms := STSymbolsForModule(Info);
+    if Syms = nil then
+      Exit(Format('[%p]', [Pointer(Address)]));
+    Result := '';
+    if Syms.Loaded and (Address >= Syms.Base) and
+       ((Syms.SizeOfImage = 0) or (Address - Syms.Base < Syms.SizeOfImage)) then
+    begin
+      SymName := Syms.FindSymbol(Address);
+      Syms.FindLine(Address, LineNum, LineUnit);
+      if (LineUnit <> '') and (SymName <> '') and SymName.StartsWith(LineUnit + '.') then
+      begin
+        FuncName := Copy(SymName, Length(LineUnit) + 2, MaxInt);
+        // Win32 Finalization fix
+        if (Syms.ProgramName <> '') and
+           SameText(LineUnit, Syms.ProgramName) and
+           SameText(FuncName, 'Finalization') then
+          FuncName := Syms.ProgramName;
+        if LineNum > 0 then
+          Result := Format('%s.%s (line %d)', [LineUnit, FuncName, LineNum])
+        else
+          Result := Format('%s.%s', [LineUnit, FuncName]);
+      end
+      else if (LineUnit <> '') and (LineNum > 0) then
+        Result := Format('%s (line %d)', [LineUnit, LineNum])
+      else if SymName <> '' then
+        Result := SymName;
+    end;
+    if Result = '' then
+    begin
+      // No map symbols for this module: the PE export table is the next best
+      // hint, and after that a plain module-relative offset.
+      Result := STExportNameForAddress(Info, Address);
+      if Result = '' then
+        Result := Format('%s+0x%x', [Info.ModuleName, Address - Info.Base]);
+    end;
+  end;
 end;
 
 procedure STInitCapture;
@@ -6208,14 +6728,93 @@ begin
     @GSTCapture := GetProcAddress(H, 'RtlCaptureStackBackTrace');
 end;
 
-// One thread builds the symbol table. A thread arriving while it is being
-// built gives up its trace rather than read GSTSymbols/GSTLines while
-// STLoadMap is freeing and regrowing them: a missing trace beats a torn read,
-// and on a {$R-} build the torn read corrupts the heap instead of raising.
-// Returns True only when the table is complete and safe to consult.
-function STEnsureInit: Boolean;
+{$IFDEF CPUX86}
+type
+  // The classic FPO-free stack frame: saved EBP, then return address.
+  TSTStackFrame = record
+    CallerFrame: NativeUInt;
+    CallerAddr: NativeUInt;
+  end;
+  PSTStackFrame = ^TSTStackFrame;
+
+function STCaptureFrames(AFrames: PPointerArray; AMax: Integer): Integer; forward;
+
+// No stack frames are generated for a pure asm routine, so EBP read here is
+// the frame of the function that called us - the chain head of the walk.
+{$STACKFRAMES OFF}
+function STGetFramePointer: Pointer;
+asm
+  MOV EAX, EBP
+end;
+
+// Thread stack bounds from the TIB: StackBase at FS:[4], StackLimit at FS:[8].
+function STGetStackBase: Pointer;
+asm
+  MOV EAX, FS:[4]
+end;
+
+function STGetStackLimit: Pointer;
+asm
+  MOV EAX, FS:[8]
+end;
+{$STACKFRAMES ON}
+
+// Walks the EBP chain ascending: on Win32 RtlCaptureStackBackTrace has no
+// unwind tables to lean on at raise time, so the frame chain is walked by
+// hand. Every recorded return address must sit inside a loaded module;
+// frames that fail are skipped while the walk continues. A caller frame
+// outside the thread stack or not strictly ascending stops the walk: a
+// shorter trace beats a made-up one.
+function STCaptureFrames(AFrames: PPointerArray; AMax: Integer): Integer;
 var
-  MapFile: string;
+  Frame: PSTStackFrame;
+  StackBase, StackLimit, PrevFrame, CallerFrame, CallerAddr: NativeUInt;
+begin
+  Result := 0;
+  if (AFrames = nil) or (AMax <= 0) then
+    Exit;
+  StackBase := NativeUInt(STGetStackBase);
+  StackLimit := NativeUInt(STGetStackLimit);
+  if StackBase <= StackLimit then
+    Exit;
+  Frame := PSTStackFrame(STGetFramePointer);
+  PrevFrame := NativeUInt(Frame);
+  while Result < AMax do
+  begin
+    // Frame inside the thread stack, with room for both fields, before any
+    // dereference.
+    if (NativeUInt(Frame) < StackLimit) or
+       (NativeUInt(Frame) + SizeOf(TSTStackFrame) > StackBase) then
+      Break;
+    CallerFrame := Frame^.CallerFrame;
+    // Ascending chain, still inside the stack.
+    if (CallerFrame <= PrevFrame) or
+       (CallerFrame < StackLimit) or
+       (CallerFrame + SizeOf(TSTStackFrame) > StackBase) then
+      Break;
+    CallerAddr := Frame^.CallerAddr;
+    // Module membership FIRST: the call-site probe reads eight bytes before
+    // the address, and only a mapped module guarantees mapped memory there.
+    if STModuleInfoForAddress(CallerAddr).Module <> 0 then
+    begin
+      // Points the address at the CALL, not at the instruction after it, so
+      // the line numbers land on the caller's call line.
+      if STCallSiteSize(CallerAddr) > 0 then
+        Dec(CallerAddr, STCallSiteSize(CallerAddr));
+      AFrames[Result] := Pointer(CallerAddr);
+      Inc(Result);
+    end;
+    PrevFrame := CallerFrame;
+    Frame := PSTStackFrame(CallerFrame);
+  end;
+end;
+{$ENDIF CPUX86}
+
+// One thread builds the state; any other thread arriving while it is being
+// built gives up its trace rather than read a half-initialized structure: a
+// missing trace beats a torn read. Returns True once the state is complete
+// and safe to consult.
+function STEnsureInit: Boolean;
 begin
   Result := GSTInitState = ST_INIT_READY;
   if Result then
@@ -6224,17 +6823,22 @@ begin
   if GSTTestYieldBeforeClaim then
     Sleep(1);
 {$ENDIF}
-  // Whoever wins this claims the load; everyone else leaves empty-handed.
+  // Whoever wins this claims the init; everyone else leaves empty-handed.
   if TInterlocked.CompareExchange(GSTInitState, ST_INIT_LOADING, ST_INIT_IDLE) <> ST_INIT_IDLE then
     Exit;
   try
     STInitCapture;
-    GSTCodeBase := NativeUInt(HInstance);
-    MapFile := ChangeFileExt(GetModuleName(HInstance), '.map');
-    STLoadMap(MapFile);
+    GSTModuleSymbolsLock := TCriticalSection.Create;
+    GSTModuleSymbols := TDictionary<THandle, TSTModuleSymbols>.Create;
+    GSTExportTables := TDictionary<THandle, TSTExportCache>.Create;
+    GSTHostInfo := STModuleInfoForAddress(NativeUInt(HInstance));
+    // Published last: a thread that sees ST_INIT_READY sees complete state.
+    GSTInitState := ST_INIT_READY;
   finally
-    // Published last: a thread that sees ST_INIT_READY sees a complete table.
-    TInterlocked.Exchange(GSTInitState, ST_INIT_READY);
+    // A half-built init must not be published as ready and must not stick
+    // as loading either: the next raise retries.
+    if GSTInitState <> ST_INIT_READY then
+      TInterlocked.Exchange(GSTInitState, ST_INIT_IDLE);
   end;
   Result := True;
 end;
@@ -6255,6 +6859,7 @@ begin
     (Pos('RaiseException', ALine) > 0) or
     (Pos('NotifyExceptFinally', ALine) > 0) or
     (Pos('@RaiseExcept', ALine) > 0) or
+    (Pos('InternalRaiseAtExcept', ALine) > 0) or
     (Pos('@HandleFinally', ALine) > 0) or
     (Pos('@HandleAnyException', ALine) > 0) or
     (Pos('@HandleOnException', ALine) > 0) or
@@ -6262,17 +6867,16 @@ begin
     (Pos('ExeWatchGetExceptionStackInfo', ALine) > 0) or
     (Pos('ScanStackForTrace', ALine) > 0) or
     (Pos('GetStackTraceStr', ALine) > 0) or
+    (Pos('GetExceptionTraceStr', ALine) > 0) or
     (Pos('GetLastExceptionStackTrace', ALine) > 0) or
     (Pos('STEnsureInit', ALine) > 0) or
-    (Pos('STResolveAddr', ALine) > 0) or
-    (Pos('STFindSymbol', ALine) > 0) or
-    (Pos('STFindLine', ALine) > 0);
+    (Pos('STResolveAddr', ALine) > 0);
 end;
 
 function GetStackTraceStr(FramesToSkip: Integer = 0): string;
 var
   Frames: array[0..ST_MAX_FRAMES - 1] of Pointer;
-  Count, I: Integer;
+  Count, I, Start: Integer;
   SB: TStringBuilder;
   S: string;
 begin
@@ -6281,16 +6885,24 @@ begin
   // is a torn read, so this frame simply goes without a trace.
   if not STEnsureInit then
     Exit;
-  if not Assigned(GSTCapture) then Exit;
-
   FillChar(Frames, SizeOf(Frames), 0);
+  Count := 0;
+{$IFDEF CPUX64}
+  if not Assigned(GSTCapture) then Exit;
   Count := GSTCapture(FramesToSkip + 1, ST_MAX_FRAMES, @Frames[0], nil);
-
-  if Count = 0 then Exit;
-
+  Start := 0;
+{$ENDIF}
+{$IFDEF CPUX86}
+  // x86 has no unwind tables: capture the whole chain with the frame walk
+  // and apply here the same first-kept offset the Win64 API gives us.
+  Count := STCaptureFrames(@Frames[0], ST_MAX_FRAMES);
+  Start := FramesToSkip + 1;
+{$ENDIF}
+  if (Count = 0) or (Start >= Count) then
+    Exit;
   SB := TStringBuilder.Create;
   try
-    for I := 0 to Count - 1 do
+    for I := Start to Count - 1 do
     begin
       if Frames[I] = nil then Continue;
       S := STResolveAddr(NativeUInt(Frames[I]));
@@ -6304,15 +6916,37 @@ begin
   end;
 end;
 
+// The reason answers for the HOST module - not for the last frame the trace
+// happened to resolve: an error whose deepest frame sits in kernel32 must
+// not be reported as "no symbols". A trace only reaches the reason field
+// when it came out empty, so reason 3 means "the capture produced nothing";
+// reason 2 now means "the host module carries no symbols at all" (resource
+// and .map file both), reason 1 stays the unavailable capture mechanism.
+// Body per architecture: this section lives under neither ifdef.
+{$IFDEF CPUX86}
+function GetNoStackTraceReason: Integer;
+begin
+  if (GSTHostInfo.Module = 0) or
+     not STEntryUsable(STSymbolsForModule(GSTHostInfo), GSTHostInfo) or
+     not STSymbolsForModule(GSTHostInfo).Loaded then
+    Result := 2  // the host module has no usable symbol table
+  else
+    Result := 3; // capture returned 0 frames
+end;
+{$ENDIF CPUX86}
+{$IFDEF CPUX64}
 function GetNoStackTraceReason: Integer;
 begin
   if not Assigned(GSTCapture) then
     Result := 1  // RtlCaptureStackBackTrace not available
-  else if not GSTLoaded then
-    Result := 2  // Map file not found
+  else if (GSTHostInfo.Module = 0) or
+          not STEntryUsable(STSymbolsForModule(GSTHostInfo), GSTHostInfo) or
+          not STSymbolsForModule(GSTHostInfo).Loaded then
+    Result := 2  // the host module has no usable symbol table
   else
-    Result := 3; // Stack capture returned 0 frames
+    Result := 3; // capture returned 0 frames
 end;
+{$ENDIF CPUX64}
 
 {$ELSE}
 
@@ -6345,6 +6979,58 @@ begin
 {$ENDIF}
 end;
 
+{$IFDEF MSWINDOWS}
+// Trace for the exception hook. On Win32 the frame chain jumps from the
+// exception machinery straight past the raising function - the raiser's own
+// frame is consumed on the RTL raise path - so the raiser's address, taken
+// from the exception record (the raise statement), is prepended first. On
+// Win64 the API capture already starts at the raise, so the ordinary capture
+// is reused unchanged.
+{$IFDEF CPUX86}
+function GetExceptionTraceStr(AExceptAddr: Pointer): string;
+var
+  Frames: array[0..ST_MAX_FRAMES - 1] of Pointer;
+  Count, I: Integer;
+  SB: TStringBuilder;
+  S: string;
+begin
+  Result := '';
+  if not STEnsureInit then
+    Exit;
+  FillChar(Frames, SizeOf(Frames), 0);
+  // The raiser enters first, taken from the exception record itself.
+  Frames[0] := AExceptAddr;
+  Count := 0;
+  if AExceptAddr = nil then
+    Count := STCaptureFrames(@Frames[0], ST_MAX_FRAMES)
+  else
+    Count := 1 + STCaptureFrames(@Frames[1], ST_MAX_FRAMES - 1);
+  if Count = 0 then
+    Exit;
+  SB := TStringBuilder.Create;
+  try
+    for I := 0 to Count - 1 do
+    begin
+      if Frames[I] = nil then Continue;
+      S := STResolveAddr(NativeUInt(Frames[I]));
+      if IsRTLInternalFrame(S) then Continue;
+      if SB.Length > 0 then SB.AppendLine;
+      SB.Append(S);
+    end;
+    Result := SB.ToString;
+  finally
+    SB.Free;
+  end;
+end;
+{$ENDIF CPUX86}
+{$IFDEF CPUX64}
+function GetExceptionTraceStr(AExceptAddr: Pointer): string;
+begin
+  Result := GetStackTraceStr(0);
+end;
+{$ENDIF CPUX64}
+{$ENDIF MSWINDOWS}
+
 // Gives the RTL hooks back only if they are still ours. Units finalize in
 // reverse initialization order, so anything listed before ExeWatch in the .dpr
 // finalizes AFTER it: an unconditional restore tears out a handler that another
@@ -6375,48 +7061,183 @@ begin
 end;
 
 {$IFDEF MSWINDOWS}
-// Puts the symbol table back to never-loaded so a test can drive the very
-// first initialisation, which is the only moment the race exists.
+// Puts the symbol state back to never-initialized so a test can drive the
+// very first initialisation, which is the only moment the race exists.
 procedure EWTestResetStackTraceInit(AYieldBeforeClaim: Boolean);
+var
+  Pair: TPair<THandle, TSTModuleSymbols>;
 begin
   GSTTestYieldBeforeClaim := AYieldBeforeClaim;
   GSTLoadInFlight := 0;
   GSTLoadInFlightMax := 0;
-  SetLength(GSTSymbols, 0);
-  SetLength(GSTLines, 0);
-  GSTLoaded := False;
+  // Tests reset only where no resolver is running (the suite resets
+  // sequentially): freeing the entries while a resolver holds a pointer
+  // would be a use-after-free. The dictionary shells go too, so state is
+  // genuinely back to never-initialized and init recreates them.
+  if GSTModuleSymbolsLock <> nil then
+  begin
+    GSTModuleSymbolsLock.Acquire;
+    try
+      if GSTModuleSymbols <> nil then
+        for Pair in GSTModuleSymbols do
+          Pair.Value.Free;
+      FreeAndNil(GSTExportTables);
+    finally
+      GSTModuleSymbolsLock.Release;
+    end;
+  end;
+  FreeAndNil(GSTModuleSymbols);
+  FreeAndNil(GSTModuleSymbolsLock);
   GSTInitState := ST_INIT_IDLE;
 end;
 
-// Highest number of threads ever inside STLoadMap at once. Anything above 1
-// means two threads were rebuilding the same arrays.
+// Highest number of threads ever inside a symbol-table build at once. Above
+// 1 means two threads were rebuilding the same module's table.
 function EWTestMaxConcurrentMapLoads: Integer;
 begin
   Result := GSTLoadInFlightMax;
 end;
 
-// Replaces the symbol table with ACount synthetic entries at AStep intervals,
-// so a test can probe resolution without needing a real executable of that
-// size. Leaves the table published, as a completed load would.
+// Replaces the host module's symbol table with ACount synthetic entries at
+// AStep intervals, so a test can probe resolution without needing a real
+// executable of that size. Leaves the state published, as a completed init
+// would.
 procedure EWTestSeedSymbols(ACount: Integer; AStep: NativeUInt; ACodeBase: NativeUInt);
 var
   I: Integer;
+  Entry, Old: TSTModuleSymbols;
 begin
-  GSTCodeBase := ACodeBase;
-  SetLength(GSTSymbols, ACount);
+  // A reset before the seed frees the lock and the dictionaries; recreate.
+  if GSTModuleSymbolsLock = nil then
+    GSTModuleSymbolsLock := TCriticalSection.Create;
+  if GSTModuleSymbols = nil then
+    GSTModuleSymbols := TDictionary<THandle, TSTModuleSymbols>.Create;
+  if GSTExportTables = nil then
+    GSTExportTables := TDictionary<THandle, TSTExportCache>.Create;
+  Entry := TSTModuleSymbols.Create;
+  Entry.Module := HInstance;
+  Entry.Base := ACodeBase;
+  Entry.Loaded := True;
   for I := 0 to ACount - 1 do
-  begin
-    GSTSymbols[I].Address := NativeUInt(I) * AStep;
-    GSTSymbols[I].Name := 'Seeded.Sym' + IntToStr(I);
+    Entry.AddSymbol(NativeUInt(I) * AStep, 'Seeded.Sym' + IntToStr(I));
+  Entry.ShrinkAndSort;
+  GSTHostInfo.Module := HInstance;
+  GSTHostInfo.Base := ACodeBase;
+  GSTModuleSymbolsLock.Acquire;
+  try
+    if GSTModuleSymbols.TryGetValue(HInstance, Old) then
+      Old.Free;
+    GSTModuleSymbols.AddOrSetValue(HInstance, Entry);
+  finally
+    GSTModuleSymbolsLock.Release;
   end;
-  SetLength(GSTLines, 0);
-  GSTLoaded := True;
   GSTInitState := ST_INIT_READY;
 end;
 
 function EWTestFindSymbol(AAddress: NativeUInt): string;
+var
+  Entry: TSTModuleSymbols;
 begin
-  Result := STFindSymbol(AAddress);
+  Result := '';
+  GSTModuleSymbolsLock.Acquire;
+  try
+    if not GSTModuleSymbols.TryGetValue(HInstance, Entry) then
+      Exit;
+    Result := Entry.FindSymbol(AAddress);
+  finally
+    GSTModuleSymbolsLock.Release;
+  end;
+end;
+
+function EWTestModuleInfoForAddress(AAddress: NativeUInt): TSTModuleInfo;
+begin
+  Result := STModuleInfoForAddress(AAddress);
+end;
+
+function EWTestResolveAddress(AAddress: NativeUInt): string;
+begin
+  STEnsureInit;
+  Result := STResolveAddr(AAddress);
+end;
+
+function EWTestModuleText(AModule: THandle): string;
+begin
+  STEnsureInit;
+  Result := STSymbolTextForModule(AModule);
+end;
+
+{$IFDEF CPUX86}
+function EWTestCallSiteSize(AReturnAddress: NativeUInt): Cardinal;
+begin
+  Result := STCallSiteSize(AReturnAddress);
+end;
+{$ENDIF CPUX86}
+
+function STCountMapSymbols(const AText: string): Integer;
+var
+  SL: TStringList;
+  I: Integer;
+  BlankCount: Integer;
+  InSection: Boolean;
+begin
+  Result := 0;
+  if AText = '' then
+    Exit;
+  SL := TStringList.Create;
+  try
+    SL.Text := AText;
+    InSection := False;
+    BlankCount := 0;
+    for I := 0 to SL.Count - 1 do
+    begin
+      if not InSection then
+      begin
+        if Pos('Publics by Value', SL[I]) > 0 then
+          InSection := True;
+        Continue;
+      end;
+      if Trim(SL[I]) = '' then
+      begin
+        Inc(BlankCount);
+        if BlankCount >= 2 then
+          Break;
+        Continue;
+      end;
+      BlankCount := 0;
+      // One entry per map row: segment:offset then the symbol name.
+      if (SL[I].StartsWith(' ')) and (Pos(':', SL[I]) > 0) and
+         (not SL[I].StartsWith('Address')) then
+        Inc(Result);
+    end;
+  finally
+    SL.Free;
+  end;
+end;
+
+function EWTestCountEmbeddedMapSymbols(AModule: THandle): Integer;
+var
+  ResInfo: HRSRC;
+  ResLoad: HGLOBAL;
+  ResPtr: Pointer;
+  ResSize: Integer;
+  Bytes: TBytes;
+begin
+  Result := 0;
+  if AModule = 0 then
+    Exit;
+  ResInfo := FindResource(AModule, EW_MAP_RESOURCE_NAME, RT_RCDATA);
+  if ResInfo = 0 then
+    Exit;
+  ResLoad := LoadResource(AModule, ResInfo);
+  ResSize := SizeOfResource(AModule, ResInfo);
+  if (ResLoad = 0) or (ResSize <= 0) then
+    Exit;
+  ResPtr := LockResource(ResLoad);
+  if ResPtr = nil then
+    Exit;
+  SetLength(Bytes, ResSize);
+  Move(ResPtr^, Bytes[0], ResSize);
+  Result := STCountMapSymbols(TEncoding.Default.GetString(Bytes));
 end;
 
 // Two stand-ins for the round trip below. Neither is ever called.
@@ -6482,12 +7303,37 @@ end;
 {$ENDIF}
 {$ENDIF}
 
+{$IFDEF MSWINDOWS}
+// Frees the whole per-module symbol state. Runs from the finalization; no
+// trace is expected after that, so the published entries are simply dropped.
+procedure STFinalizeState;
+var
+  Pair: TPair<THandle, TSTModuleSymbols>;
+begin
+  if GSTModuleSymbolsLock <> nil then
+    GSTModuleSymbolsLock.Acquire;
+  try
+    if GSTModuleSymbols <> nil then
+      for Pair in GSTModuleSymbols do
+        Pair.Value.Free;
+    GSTModuleSymbols.Free;
+    GSTModuleSymbols := nil;
+    FreeAndNil(GSTExportTables);
+  finally
+    if GSTModuleSymbolsLock <> nil then
+      GSTModuleSymbolsLock.Release;
+  end;
+  FreeAndNil(GSTModuleSymbolsLock);
+end;
+{$ENDIF}
+
 initialization
   GExeWatchLock := TCriticalSection.Create;
   // Install exception handler
   GOldExceptProc := System.ExceptProc;
   System.ExceptProc := @ExeWatchExceptProc;
-  // Capture stack at raise time (Win64 only — table-based unwinding works)
+  // Capture stack at raise time (Win64: table-based unwinding works; Win32
+  // walk lands with the per-architecture capture work)
   {$IFDEF MSWINDOWS}
   GOldGetExceptionStackInfoProc := Exception.GetExceptionStackInfoProc;
   GOldGetStackInfoStringProc := Exception.GetStackInfoStringProc;
@@ -6500,6 +7346,9 @@ initialization
 finalization
   ExeWatchRestoreRtlHooks;
   FinalizeExeWatch;
+  {$IFDEF MSWINDOWS}
+  STFinalizeState;
+  {$ENDIF}
   FreeAndNil(GExeWatchLock);
 
 end.
