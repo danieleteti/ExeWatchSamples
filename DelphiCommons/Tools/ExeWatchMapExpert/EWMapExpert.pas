@@ -31,15 +31,38 @@ const
   EW_EXEWATCH_UNIT = 'ExeWatchSDKv1';
   EW_MAP_OPTION_NAME = 'DCC_MapFile';
   EW_MAP_OPTION_DETAILED = '3';
+  // Per-project toggle: default is ON for every project that links the SDK;
+  // the project manager menu writes this project option (persisted inside
+  // the .dproj), and/or a comment placed by hand in the .dpr turns it off:
+  //   // EXEWATCH MAP LINK: OFF
+  EW_MAP_LINK_OPTION = 'EWExeWatchMapLink';
+  EW_MAP_LINK_COMMENT_OFF = 'EXEWATCH MAP LINK: OFF';
 
 type
+  TEWMapExpert = class;
+
+  // Declared in full here because the expert's constructor creates it; the
+  // method bodies sit at the end of the unit, beside TEWProjectMenu's.
+  TEWMenuNotifier = class(TNotifierObject, IOTANotifier, IOTAProjectMenuItemCreatorNotifier)
+  private
+    FExpert: TEWMapExpert;
+  public
+    constructor Create(AExpert: TEWMapExpert);
+    procedure AddMenu(const AProject: IOTAProject; const AIdentList: TStrings;
+      const AProjectManagerMenuList: IInterfaceList; AIsMultiSelect: Boolean);
+  end;
+
   TEWMapExpert = class(TInterfacedObject, IOTAWizard,
     IOTAIDENotifier, IOTAIDENotifier50, IOTAIDENotifier80)
   private
     FNotifierIndex: Integer;
+    FMenuNotifierIndex: Integer;
     procedure AddMsg(const AProject: IOTAProject; const AMsg: string);
     function FileMentionsExeWatch(const AFileName: string): Boolean;
     function ProjectLinksExeWatch(const AProject: IOTAProject): Boolean;
+    function ProjectSourceText(const AProject: IOTAProject): string;
+    function MapLinkWanted(const AProject: IOTAProject): Boolean;
+    procedure ToggleMapLink(const AProject: IOTAProject);
     procedure ForceMapOptionOn(const AConfig: IOTABuildConfiguration);
     procedure ForceMapOption(const AProject: IOTAProject);
     procedure ProcessProject(const AProject: IOTAProject);
@@ -84,20 +107,69 @@ begin
     Result := APath;
 end;
 
+// Right-click on a project: the state of the map link and its toggle. The
+// state lives in a project option (the .dproj): the editor buffer and the
+// file never diverge, nothing here edits text under a live IDE.
+type
+  TEWProjectMenu = class(TNotifierObject, IOTALocalMenu, IOTAProjectManagerMenu)
+  private
+    FExpert: TEWMapExpert;
+    FProject: IOTAProject;
+  public
+    constructor Create(AExpert: TEWMapExpert; const AProject: IOTAProject);
+    { IOTALocalMenu }
+    function GetCaption: string;
+    function GetChecked: Boolean;
+    function GetEnabled: Boolean;
+    function GetHelpContext: Integer;
+    function GetName: string;
+    function GetParent: string;
+    function GetPosition: Integer;
+    function GetVerb: string;
+    procedure SetCaption(const Value: string);
+    procedure SetChecked(Value: Boolean);
+    procedure SetEnabled(Value: Boolean);
+    procedure SetHelpContext(Value: Integer);
+    procedure SetName(const Value: string);
+    procedure SetParent(const Value: string);
+    procedure SetPosition(Value: Integer);
+    procedure SetVerb(const Value: string);
+    { IOTAProjectManagerMenu }
+    function GetIsMultiSelectable: Boolean;
+    procedure SetIsMultiSelectable(Value: Boolean);
+    procedure Execute(const MenuContextList: IInterfaceList);
+    function PreExecute(const MenuContextList: IInterfaceList): Boolean;
+    function PostExecute(const MenuContextList: IInterfaceList): Boolean;
+  end;
+
 constructor TEWMapExpert.Create;
 begin
   inherited Create;
   FNotifierIndex := -1;
+  FMenuNotifierIndex := -1;
   try
     FNotifierIndex := (BorlandIDEServices as IOTAServices).AddNotifier(Self);
   except
     // Without the notifier the expert simply does nothing; installing it is
     // not worth a broken IDE startup.
   end;
+  try
+    FMenuNotifierIndex :=
+      (BorlandIDEServices as IOTAProjectManager).AddMenuItemCreatorNotifier(
+        TEWMenuNotifier.Create(Self));
+  except
+    // No project-manager menu: the project option and the .dpr comment
+    // still control the toggle.
+  end;
 end;
 
 destructor TEWMapExpert.Destroy;
 begin
+  if (FMenuNotifierIndex >= 0) and (BorlandIDEServices <> nil) then
+  try
+    (BorlandIDEServices as IOTAProjectManager).RemoveMenuItemCreatorNotifier(FMenuNotifierIndex);
+  except
+  end;
   if (FNotifierIndex >= 0) and (BorlandIDEServices <> nil) then
   try
     (BorlandIDEServices as IOTAServices).RemoveNotifier(FNotifierIndex);
@@ -171,6 +243,70 @@ begin
   end;
 end;
 
+// Source text of the project, whichever container file (.dpr or .dproj)
+// carries the unit references: one read per call, both for the ExeWatch
+// check and for the hand-written OFF comment.
+function TEWMapExpert.ProjectSourceText(const AProject: IOTAProject): string;
+var
+  Names: array[0..1] of string;
+  I: Integer;
+begin
+  Result := '';
+  if AProject = nil then
+    Exit;
+  Names[0] := AProject.FileName;
+  Names[1] := ChangeFileExt(AProject.FileName, '.dpr');
+  for I := 0 to 1 do
+    if FileExists(Names[I]) then
+    try
+      Result := Result + TFile.ReadAllText(Names[I]);
+    except
+      // An unreadable container says nothing about map linking.
+    end;
+end;
+
+function TEWMapExpert.MapLinkWanted(const AProject: IOTAProject): Boolean;
+begin
+  // Default ON. Off when the project option says so (the manager menu) or
+  // when the .dpr carries the hand-written comment.
+  Result := True;
+  if (AProject = nil) or (AProject.ProjectOptions = nil) then
+    Exit;
+  try
+    if SameText(string(AProject.ProjectOptions.Values[EW_MAP_LINK_OPTION]), 'Off') then
+      Exit(False);
+  except
+    // Options that refuse custom keys keep the default.
+  end;
+  if Pos(EW_MAP_LINK_COMMENT_OFF, UpperCase(ProjectSourceText(AProject))) > 0 then
+    Result := False;
+end;
+
+procedure TEWMapExpert.ToggleMapLink(const AProject: IOTAProject);
+var
+  NewOn: Boolean;
+begin
+  if (AProject = nil) or (AProject.ProjectOptions = nil) then
+    Exit;
+  NewOn := not MapLinkWanted(AProject);
+  try
+    if NewOn then
+      AProject.ProjectOptions.Values[EW_MAP_LINK_OPTION] := 'On'
+    else
+      AProject.ProjectOptions.Values[EW_MAP_LINK_OPTION] := 'Off';
+    AProject.ProjectOptions.ModifiedState := True;
+    if NewOn then
+      AddMsg(AProject, 'Map link ENABLED: next build links the .map into the binary ' +
+        '(the option is saved with the project)')
+    else
+      AddMsg(AProject, 'Map link DISABLED: builds will no longer inject the map ' +
+        '(the option is saved with the project)');
+  except
+    on E: Exception do
+      AddMsg(AProject, 'Map link toggle failed: ' + E.ClassName + ': ' + E.Message);
+  end;
+end;
+
 procedure TEWMapExpert.ForceMapOptionOn(const AConfig: IOTABuildConfiguration);
 var
   I: Integer;
@@ -237,6 +373,8 @@ begin
     Exit;
   end;
 
+  if not MapLinkWanted(AProject) then
+    Exit;
   MapFile := ChangeFileExt(Target, '.map');
   if not FileExists(MapFile) then
   begin
@@ -300,7 +438,7 @@ begin
   if IsCodeInsight then
     Exit;
   try
-    if ProjectLinksExeWatch(AProject) then
+    if MapLinkWanted(AProject) then
       ForceMapOption(AProject);
   except
     // A failed option read keeps the project's own settings; the build goes on.
@@ -323,6 +461,132 @@ begin
     on E: Exception do
       AddMsg(AProject, 'Internal error: ' + E.ClassName + ': ' + E.Message);
   end;
+end;
+
+constructor TEWProjectMenu.Create(AExpert: TEWMapExpert; const AProject: IOTAProject);
+begin
+  inherited Create;
+  FExpert := AExpert;
+  FProject := AProject;
+end;
+
+function TEWProjectMenu.GetCaption: string;
+begin
+  if (FExpert = nil) or (not FExpert.MapLinkWanted(FProject)) then
+    Result := 'ExeWatch: map link disabled'
+  else
+    Result := 'ExeWatch: map link enabled';
+end;
+
+function TEWProjectMenu.GetChecked: Boolean;
+begin
+  if FExpert = nil then
+    Result := False
+  else
+    Result := FExpert.MapLinkWanted(FProject);
+end;
+
+function TEWProjectMenu.GetEnabled: Boolean;
+begin
+  Result := True;
+end;
+
+function TEWProjectMenu.GetHelpContext: Integer;
+begin
+  Result := 0;
+end;
+
+function TEWProjectMenu.GetName: string;
+begin
+  Result := 'EWMapLinkToggle';
+end;
+
+function TEWProjectMenu.GetParent: string;
+begin
+  Result := '';
+end;
+
+function TEWProjectMenu.GetPosition: Integer;
+begin
+  Result := pmmpUserOptions;
+end;
+
+function TEWProjectMenu.GetVerb: string;
+begin
+  Result := 'ExeWatchMapLinkToggle';
+end;
+
+procedure TEWProjectMenu.SetCaption(const Value: string);
+begin
+end;
+
+procedure TEWProjectMenu.SetChecked(Value: Boolean);
+begin
+end;
+
+procedure TEWProjectMenu.SetEnabled(Value: Boolean);
+begin
+end;
+
+procedure TEWProjectMenu.SetHelpContext(Value: Integer);
+begin
+end;
+
+procedure TEWProjectMenu.SetName(const Value: string);
+begin
+end;
+
+procedure TEWProjectMenu.SetParent(const Value: string);
+begin
+end;
+
+procedure TEWProjectMenu.SetPosition(Value: Integer);
+begin
+end;
+
+procedure TEWProjectMenu.SetVerb(const Value: string);
+begin
+end;
+
+function TEWProjectMenu.GetIsMultiSelectable: Boolean;
+begin
+  Result := False;
+end;
+
+procedure TEWProjectMenu.SetIsMultiSelectable(Value: Boolean);
+begin
+end;
+
+procedure TEWProjectMenu.Execute(const MenuContextList: IInterfaceList);
+begin
+  if FExpert <> nil then
+    FExpert.ToggleMapLink(FProject);
+end;
+
+function TEWProjectMenu.PreExecute(const MenuContextList: IInterfaceList): Boolean;
+begin
+  Result := True;
+end;
+
+function TEWProjectMenu.PostExecute(const MenuContextList: IInterfaceList): Boolean;
+begin
+  Result := True;
+end;
+
+// Feeds the project manager: one toggle item per project container.
+constructor TEWMenuNotifier.Create(AExpert: TEWMapExpert);
+begin
+  inherited Create;
+  FExpert := AExpert;
+end;
+
+procedure TEWMenuNotifier.AddMenu(const AProject: IOTAProject;
+  const AIdentList: TStrings; const AProjectManagerMenuList: IInterfaceList;
+  AIsMultiSelect: Boolean);
+begin
+  if (FExpert <> nil) and (not AIsMultiSelect) and Assigned(AProject) and
+     (AIdentList.IndexOf(sProjectContainer) >= 0) then
+    AProjectManagerMenuList.Add(TEWProjectMenu.Create(FExpert, AProject));
 end;
 
 end.
