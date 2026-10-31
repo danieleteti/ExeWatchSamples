@@ -285,6 +285,20 @@ begin
 end;
 
 
+procedure EWAddTrace(const ALine: string);
+var
+  LogFile: string;
+begin
+  try
+    LogFile := TPath.Combine(TPath.GetTempPath, 'ewmap_add_log.txt');
+    TFile.AppendAllText(LogFile, TimeToStr(Now) + ' ' + ALine + sLineBreak,
+      TEncoding.UTF8);
+  except
+    on E: Exception do
+      ;  // tracing never becomes the user's problem
+  end;
+end;
+
 // 'Add ExeWatch Monitoring': the SDK unit (+ the VCL/FMX wrapper for GUI
 // projects) into the .dpr's uses and the integration comment at the top,
 // all through the IDE buffer in undoable steps. Idempotent: a project
@@ -300,9 +314,11 @@ var
 begin
   if AProject = nil then
   begin
+    EWAddTrace('project NIL');
     AExplain('No project on this menu: IOTAProject was nil.');
     Exit;
   end;
+  EWAddTrace('project=' + AProject.FileName);
   // the work-in-progress line goes to the Messages view; the DIALOG is
   // reserved for the outcome
   EWAddMsg(AProject, 'Add ExeWatch Monitoring: working on ' +
@@ -310,6 +326,7 @@ begin
   DprFile := ChangeFileExt(AProject.FileName, '.dpr');
   if SameText(ExtractFileExt(AProject.FileName), '.dpr') then
     DprFile := AProject.FileName;
+  EWAddTrace('dpr=' + DprFile);
   if not FileExists(DprFile) then
   begin
     EWAddMsg(AProject, 'No .dpr beside ' + ExtractFileName(AProject.FileName) +
@@ -317,17 +334,24 @@ begin
     Exit;
   end;
   Module := (BorlandIDEServices as IOTAModuleServices).OpenModule(DprFile);
+  if Module = nil then
+    EWAddTrace('OpenModule NIL')
+  else
+    EWAddTrace('module opened (nil-check passed)');
   Editor := EWSourceEditorOf(Module);
   if not Assigned(Editor) then
   begin
+    EWAddTrace('NO source editor');
     EWAddMsg(AProject, 'Cannot open the source of ' + ExtractFileName(DprFile));
     Exit;
   end;
   BufferText := EWBufferText(Editor);
+  EWAddTrace('buffer=' + IntToStr(Length(BufferText)) + ' chars');
   Upper := UpperCase(BufferText);
   try
     if Pos('EXEWATCHSDKV1', Upper) > 0 then
     begin
+      EWAddTrace('already present');
       EWAddMsg(AProject, 'ExeWatchSDKv1 is already in this project''s uses: nothing to add');
       Exit;
     end;
@@ -366,11 +390,15 @@ begin
       Writer := nil;
       Editor.Show;
     end;
+    EWAddTrace('edits applied');
     EWAddMsg(AProject, ExtractFileName(DprFile) +
       ': ExeWatch unit added to the uses (one undo; Ctrl+Z takes it back)');
   except
     on E: Exception do
+    begin
+      EWAddTrace('EXCEPTION ' + E.ClassName + ': ' + E.Message);
       AExplain('Add ExeWatch Monitoring failed: ' + E.ClassName + ': ' + E.Message);
+    end;
   end;
 end;
 
