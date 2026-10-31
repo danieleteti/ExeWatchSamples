@@ -199,41 +199,51 @@ end;
 
 procedure TEWMapExpert.ProcessProject(const AProject: IOTAProject);
 var
-  Target, MapFile: string;
+  Target, MapFile, ProjectBase: string;
   SymbolCount: Integer;
   Code: Integer;
+
+  procedure Explain(const AMsg: string);
+  begin
+    // The expert is a convenience, never a gate: projects outside ExeWatch
+    // stay silent, projects inside it get told WHERE it went wrong.
+    if ProjectLinksExeWatch(AProject) then
+      AddMsg(AProject, AMsg);
+  end;
+
 begin
   if (AProject = nil) or (AProject.ProjectOptions = nil) then
     Exit;
+  ProjectBase := ChangeFileExt(AProject.FileName, '');
   Target := AProject.ProjectOptions.TargetName;
-  if Target = '' then
+  if (Target = '') or (Pos('$(', Target) > 0) then
   begin
-    // No target name from the options: try the project's own base name with
-    // both binary extensions, in the project directory.
-    Target := ChangeFileExt(AProject.FileName, '');
+    // No usable target name from the options: try the project's own base
+    // name with both binary extensions, in the project directory.
+    Target := ProjectBase;
   end
   else
     Target := EWMapMakePath(ExtractFilePath(AProject.FileName), Target);
-
-  if Pos('$(', Target) > 0 then
-  begin
-    // Macro tokens left in the target: fall back to the project base name.
-    Target := ChangeFileExt(AProject.FileName, '');
-  end;
 
   if (not FileExists(Target)) and FileExists(Target + '.exe') then
     Target := Target + '.exe'
   else if (not FileExists(Target)) and FileExists(Target + '.dll') then
     Target := Target + '.dll';
   if not FileExists(Target) then
+  begin
+    Explain('Output not found (looked for "' + Target + '" and both binary ' +
+      'extensions): the output directory of this configuration differs from ' +
+      'what the project options expect - open it once from the IDE');
     Exit;
+  end;
 
   MapFile := ChangeFileExt(Target, '.map');
   if not FileExists(MapFile) then
   begin
-    if ProjectLinksExeWatch(AProject) then
-      AddMsg(AProject, 'No map found beside ' + ExtractFileName(Target) +
-        ': generate the Full/Detailed map file (forced at build) and retry');
+    Explain('No .map beside ' + ExtractFileName(Target) + ': the map-file ' +
+      'option (Project Options > Compiling > Linking > Map file = ' +
+      'Full/Detailed) was not applied to the configuration just built; ' +
+      'without it no symbols can be linked');
     Exit;
   end;
 
@@ -247,8 +257,10 @@ begin
         [ExtractFileName(Target), SymbolCount]));
     3:
       AddMsg(AProject, 'Map is empty: ' + MapFile);
-    4, 5:
-      AddMsg(AProject, Format('Resource injection failed on %s (exit %d)',
+    4,
+    5:
+      AddMsg(AProject, Format('Resource injection failed on %s (exit %d; ' +
+        'if a debugger or antivirus keeps the file open, retry the build)',
         [ExtractFileName(Target), Code]));
   end;
 end;
