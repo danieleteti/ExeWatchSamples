@@ -446,6 +446,11 @@ procedure TEWMapExpert.BeforeCompile(const AProject: IOTAProject;
 begin
   if IsCodeInsight then
     Exit;
+  // Only projects that link the SDK: outside them the expert must be a
+  // silent no-op, not an option force that leaves .map files behind every
+  // unrelated build of the user's IDE.
+  if not ProjectLinksExeWatch(AProject) then
+    Exit;
   try
     if MapLinkWanted(AProject) then
       ForceMapOption(AProject);
