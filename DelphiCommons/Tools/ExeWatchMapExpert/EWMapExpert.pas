@@ -878,6 +878,7 @@ end;
 
 procedure TEWAddMonitorMenu.Execute(const MenuContextList: IInterfaceList);
 begin
+  MessageDlg('Add ExeWatch Monitoring: Execute reached', mtInformation, [mbOK], 0);
   EWAddMonitoring(FProject,
     procedure(AWhat: string)
     begin
