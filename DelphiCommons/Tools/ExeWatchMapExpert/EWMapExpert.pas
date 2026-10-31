@@ -221,6 +221,8 @@ begin
 end;
 
 function TEWMapExpert.ProjectLinksExeWatch(const AProject: IOTAProject): Boolean;
+var
+  I: Integer;
 begin
   if AProject = nil then
     Exit(False);
@@ -234,6 +236,13 @@ begin
     else
       Result := FileMentionsExeWatch(ChangeFileExt(AProject.FileName, '.dproj'));
   end;
+  // The SDK unit can also travel in the uses of ANY project unit (the new
+  // wizard puts it in the form's unit, not the .dpr): scan the project's own
+  // modules before declaring this project outside ExeWatch.
+  if not Result then
+    for I := 0 to AProject.GetModuleCount - 1 do
+      if FileMentionsExeWatch(AProject.GetModule(I).FileName) then
+        Exit(True);
 end;
 
 // Source text of the project, whichever container file (.dpr or .dproj)

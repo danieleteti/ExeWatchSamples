@@ -1,7 +1,6 @@
 package ExeWatchMapExpert;
 
 {$R *.res}
-{$R 'ExeWatchSplash.res' 'ExeWatchSplash.rc'}
 {$ALIGN 8}
 {$ASSERTIONS ON}
 {$BOOLEVAL OFF}

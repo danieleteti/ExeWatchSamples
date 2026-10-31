@@ -6552,7 +6552,6 @@ var
   Functions: PSTCardinalArray;
   I, Count: Integer;
   NameRVA, FuncRVA: DWORD;
-  NamePtr: PAnsiChar;
   InImage: PByte;
   NulFound: Boolean;
 begin
@@ -6604,7 +6603,6 @@ begin
     FuncRVA := Functions^[Ordinals^[I]];
     if FuncRVA >= AInfo.SizeOfImage then
       Continue;
-    NamePtr := PAnsiChar(AInfo.Base + NameRVA);
     // Name strings are copied with a bounded scan: a name without a NUL
     // terminator before the image end is skipped, not chased into memory
     // outside the module.
@@ -6999,7 +6997,6 @@ begin
   if not STEnsureInit then
     Exit;
   FillChar(Frames, SizeOf(Frames), 0);
-  Count := 0;
 {$IFDEF CPUX64}
   if not Assigned(GSTCapture) then Exit;
   Count := GSTCapture(FramesToSkip + 1, ST_MAX_FRAMES, @Frames[0], nil);
@@ -7113,7 +7110,6 @@ begin
   FillChar(Frames, SizeOf(Frames), 0);
   // The raiser enters first, taken from the exception record itself.
   Frames[0] := AExceptAddr;
-  Count := 0;
   if AExceptAddr = nil then
     Count := STCaptureFrames(@Frames[0], ST_MAX_FRAMES)
   else
