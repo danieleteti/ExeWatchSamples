@@ -22,7 +22,7 @@ procedure Register;
 implementation
 
 uses
-  System.SysUtils, System.Classes, System.IOUtils, Winapi.Windows,
+  System.SysUtils, System.Classes, System.IOUtils, Winapi.Windows, Vcl.Dialogs,
   ToolsAPI,
   EWMapInjectU;
 
@@ -289,7 +289,8 @@ end;
 // projects) into the .dpr's uses and the integration comment at the top,
 // all through the IDE buffer in undoable steps. Idempotent: a project
 // already carrying the unit reports and edits nothing.
-procedure EWAddMonitoring(const AProject: IOTAProject);
+procedure EWAddMonitoring(const AProject: IOTAProject;
+  const AExplain: TProc<string>);
 var
   DprFile, BufferText, Upper, UnitsText, AfterUses: string;
   Module: IOTAModule;
@@ -298,7 +299,14 @@ var
   UsesPos, BreakWalk: Integer;
 begin
   if AProject = nil then
+  begin
+    AExplain('No project on this menu: IOTAProject was nil.');
     Exit;
+  end;
+  // the work-in-progress line goes to the Messages view; the DIALOG is
+  // reserved for the outcome
+  EWAddMsg(AProject, 'Add ExeWatch Monitoring: working on ' +
+    ChangeFileExt(ExtractFileName(AProject.FileName), '.dpr') + '...');
   DprFile := ChangeFileExt(AProject.FileName, '.dpr');
   if SameText(ExtractFileExt(AProject.FileName), '.dpr') then
     DprFile := AProject.FileName;
@@ -362,7 +370,7 @@ begin
       ': ExeWatch unit added to the uses (one undo; Ctrl+Z takes it back)');
   except
     on E: Exception do
-      EWAddMsg(AProject, 'Add ExeWatch Monitoring failed: ' + E.ClassName + ': ' + E.Message);
+      AExplain('Add ExeWatch Monitoring failed: ' + E.ClassName + ': ' + E.Message);
   end;
 end;
 
@@ -870,7 +878,12 @@ end;
 
 procedure TEWAddMonitorMenu.Execute(const MenuContextList: IInterfaceList);
 begin
-  EWAddMonitoring(FProject);
+  EWAddMonitoring(FProject,
+    procedure(AWhat: string)
+    begin
+      MessageDlg('Add ExeWatch Monitoring' + sLineBreak + sLineBreak + AWhat,
+        mtInformation, [mbOK], 0);
+    end);
 end;
 
 function TEWAddMonitorMenu.PreExecute(const MenuContextList: IInterfaceList): Boolean;
