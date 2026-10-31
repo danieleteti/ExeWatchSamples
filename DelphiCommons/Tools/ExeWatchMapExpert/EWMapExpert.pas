@@ -40,6 +40,7 @@ const
 
 type
   TEWMapExpert = class;
+  TEWAddMonitorMenu = class;
 
   // Declared in full before the expert class. NO back-reference to the
   // wizard: the IDE's shutdown ordering can free the wizard object while a
@@ -51,6 +52,39 @@ type
     constructor Create;
     procedure AddMenu(const AProject: IOTAProject; const AIdentList: TStrings;
       const AProjectManagerMenuList: IInterfaceList; AIsMultiSelect: Boolean);
+  end;
+
+  // 'Add ExeWatch Monitoring' on a project's right-click: wires the SDK unit
+  // into the .dpr through the IDE buffer (single undoable edit) and leaves a
+  // step-by-step integration comment.
+  TEWAddMonitorMenu = class(TNotifierObject, IOTALocalMenu, IOTAProjectManagerMenu)
+  private
+    FProject: IOTAProject;
+  public
+    constructor Create(const AProject: IOTAProject);
+    { IOTALocalMenu }
+    function GetCaption: string;
+    function GetChecked: Boolean;
+    function GetEnabled: Boolean;
+    function GetHelpContext: Integer;
+    function GetName: string;
+    function GetParent: string;
+    function GetPosition: Integer;
+    function GetVerb: string;
+    procedure SetCaption(const Value: string);
+    procedure SetChecked(Value: Boolean);
+    procedure SetEnabled(Value: Boolean);
+    procedure SetHelpContext(Value: Integer);
+    procedure SetName(const Value: string);
+    procedure SetParent(const Value: string);
+    procedure SetPosition(Value: Integer);
+    procedure SetVerb(const Value: string);
+    { IOTAProjectManagerMenu }
+    function GetIsMultiSelectable: Boolean;
+    procedure SetIsMultiSelectable(Value: Boolean);
+    procedure Execute(const MenuContextList: IInterfaceList);
+    function PreExecute(const MenuContextList: IInterfaceList): Boolean;
+    function PostExecute(const MenuContextList: IInterfaceList): Boolean;
   end;
 
   TEWMapExpert = class(TInterfacedObject, IOTAWizard,
@@ -177,6 +211,141 @@ begin
   else
     MsgServices.AddToolMessage('', AMsg, EW_MSG_PREFIX, 0, 1);
 end;
+// The editor buffer is the source of truth while the file is open: an edit
+// made on the disk file would go lost (or worse, merged) against it.
+function EWSourceEditorOf(const AModule: IOTAModule): IOTASourceEditor;
+var
+  I: Integer;
+begin
+  for I := 0 to AModule.GetModuleFileCount - 1 do
+    if Supports(AModule.GetModuleFileEditor(I), IOTASourceEditor, Result) then
+      Exit;
+  Result := nil;
+end;
+
+function EWBufferText(const AEditor: IOTASourceEditor): string;
+const
+  CHUNK = 16384;
+var
+  Reader: IOTAEditReader;
+  Bytes: TBytes;
+  BufPos, BufRead: Integer;
+begin
+  Reader := AEditor.CreateReader;
+  BufPos := 0;
+  repeat
+    SetLength(Bytes, BufPos + CHUNK);
+    BufRead := Reader.GetText(BufPos, PAnsiChar(@Bytes[BufPos]), CHUNK);
+    if BufRead > 0 then
+      Inc(BufPos, BufRead);
+  until BufRead < CHUNK;
+  SetLength(Bytes, BufPos);
+  Result := TEncoding.UTF8.GetString(Bytes);
+end;
+
+// The step-by-step comment the menu item leaves in the .dpr.
+function EWIntegrationComment: string;
+begin
+  Result :=
+    '// ==========================================================' + sLineBreak +
+    '//  ExeWatch (exewatch.com) - how to integrate monitoring, step by step' + sLineBreak +
+    '// ==========================================================' + sLineBreak +
+    '//  1) The ExeWatchSDKv1 unit has just been added to this .dpr''s uses.' + sLineBreak +
+    '//  2) Initialize once, at startup (e.g. the main form''s OnCreate):' + sLineBreak +
+    '//       InitializeExeWatch(''api-key-from-the-ExeWatch-console'', ''customer-id'');' + sLineBreak +
+    '//     Log, metrics and breadcrumbs with: EW.Info / EW.Warning /' + sLineBreak +
+    '//     EW.Error / EW.Count / EW.Gauge / EW.StartBreadcrumb.' + sLineBreak +
+    '//  3) VCL: add ExeWatchSDKv1.VCL to the main form''s uses to capture' + sLineBreak +
+    '//     GUI exceptions; for FMX use ExeWatchSDKv1.FMX.' + sLineBreak +
+    '//  4) Stack trace with names and lines: Project Options > Compiling >' + sLineBreak +
+    '//     Linking > Map file = Detailed. The ExeWatch expert (default ON)' + sLineBreak +
+    '//     links the map into the binary at every build; without it, the' + sLineBreak +
+    '//     .map beside the executable is enough for the SDK.' + sLineBreak +
+    '// ==========================================================' + sLineBreak;
+end;
+
+
+// 'Add ExeWatch Monitoring': the SDK unit (+ the VCL/FMX wrapper for GUI
+// projects) into the .dpr's uses and the integration comment at the top,
+// all through the IDE buffer in undoable steps. Idempotent: a project
+// already carrying the unit reports and edits nothing.
+procedure EWAddMonitoring(const AProject: IOTAProject);
+var
+  DprFile, BufferText, Upper, UnitsText, AfterUses: string;
+  Module: IOTAModule;
+  Editor: IOTASourceEditor;
+  Writer: IOTAEditWriter;
+  UsesPos, BreakWalk: Integer;
+begin
+  if AProject = nil then
+    Exit;
+  DprFile := ChangeFileExt(AProject.FileName, '.dpr');
+  if SameText(ExtractFileExt(AProject.FileName), '.dpr') then
+    DprFile := AProject.FileName;
+  if not FileExists(DprFile) then
+  begin
+    EWAddMsg(AProject, 'No .dpr beside ' + ExtractFileName(AProject.FileName) +
+      ': the monitoring setup works on Delphi projects with a .dpr');
+    Exit;
+  end;
+  Module := (BorlandIDEServices as IOTAModuleServices).OpenModule(DprFile);
+  Editor := EWSourceEditorOf(Module);
+  if not Assigned(Editor) then
+  begin
+    EWAddMsg(AProject, 'Cannot open the source of ' + ExtractFileName(DprFile));
+    Exit;
+  end;
+  BufferText := EWBufferText(Editor);
+  Upper := UpperCase(BufferText);
+  try
+    if Pos('EXEWATCHSDKV1', Upper) > 0 then
+    begin
+      EWAddMsg(AProject, 'ExeWatchSDKv1 is already in this project''s uses: nothing to add');
+      Exit;
+    end;
+    if Pos('USES', Upper) = 0 then
+    begin
+      EWAddMsg(AProject, 'No uses clause in ' + ExtractFileName(DprFile));
+      Exit;
+    end;
+    // The VCL/FMX wrapper follows the .dpr's own uses; the wrapper unit must
+    // be reachable like the SDK unit (beside the .dpr or on the search path).
+    if Pos('.FMX', Upper) > 0 then
+      UnitsText := '  ExeWatchSDKv1,' + sLineBreak + '  ExeWatchSDKv1.FMX,' + sLineBreak
+    else if Pos('VCL.', Upper) > 0 then
+      UnitsText := '  ExeWatchSDKv1,' + sLineBreak + '  ExeWatchSDKv1.VCL,' + sLineBreak
+    else
+      UnitsText := '  ExeWatchSDKv1,' + sLineBreak;
+    UsesPos := Pos('USES', Upper);
+    // A single forward-only writer, edits in ascending offset order against
+    // the ORIGINAL buffer text: the comment lands before the keyword, the
+    // units on the first item's line.
+    AfterUses := BufferText.Substring(UsesPos - 1 + 4);  // from the keyword's end
+    BreakWalk := 0;
+    while (BreakWalk < Length(AfterUses)) and
+          (AfterUses[BreakWalk + 1] in [#13, #10]) do
+      Inc(BreakWalk);
+    Writer := Editor.CreateUndoableWriter;
+    try
+      // 1st edit: the comment, right before 'uses'
+      Writer.CopyTo(TEncoding.UTF8.GetByteCount(BufferText.Substring(0, UsesPos - 1)));
+      Writer.Insert(PAnsiChar(UTF8String(EWIntegrationComment + sLineBreak)));
+      // 2nd edit: the units, at the first item's line start
+      Writer.CopyTo(TEncoding.UTF8.GetByteCount(BufferText.Substring(
+        UsesPos - 1, 4 + BreakWalk)));
+      Writer.Insert(PAnsiChar(UTF8String(UnitsText)));
+    finally
+      Writer := nil;
+      Editor.Show;
+    end;
+    EWAddMsg(AProject, ExtractFileName(DprFile) +
+      ': ExeWatch unit added to the uses (one undo; Ctrl+Z takes it back)');
+  except
+    on E: Exception do
+      EWAddMsg(AProject, 'Add ExeWatch Monitoring failed: ' + E.ClassName + ': ' + E.Message);
+  end;
+end;
+
 
 procedure TEWMapExpert.AddMsg(const AProject: IOTAProject; const AMsg: string);
 begin
@@ -591,6 +760,109 @@ begin
   Result := True;
 end;
 
+// 'Add ExeWatch Monitoring' item.
+constructor TEWAddMonitorMenu.Create(const AProject: IOTAProject);
+begin
+  inherited Create;
+  FProject := AProject;
+end;
+
+function TEWAddMonitorMenu.GetCaption: string;
+begin
+  Result := 'Add ExeWatch Monitoring';
+end;
+
+function TEWAddMonitorMenu.GetChecked: Boolean;
+begin
+  Result := False;
+end;
+
+function TEWAddMonitorMenu.GetEnabled: Boolean;
+begin
+  Result := True;
+end;
+
+function TEWAddMonitorMenu.GetHelpContext: Integer;
+begin
+  Result := 0;
+end;
+
+function TEWAddMonitorMenu.GetName: string;
+begin
+  Result := 'EWAddMonitoring';
+end;
+
+function TEWAddMonitorMenu.GetParent: string;
+begin
+  Result := '';
+end;
+
+function TEWAddMonitorMenu.GetPosition: Integer;
+begin
+  Result := pmmpUserOptions;
+end;
+
+function TEWAddMonitorMenu.GetVerb: string;
+begin
+  Result := 'EWAddExeWatchMonitoring';
+end;
+
+procedure TEWAddMonitorMenu.SetCaption(const Value: string);
+begin
+end;
+
+procedure TEWAddMonitorMenu.SetChecked(Value: Boolean);
+begin
+end;
+
+procedure TEWAddMonitorMenu.SetEnabled(Value: Boolean);
+begin
+end;
+
+procedure TEWAddMonitorMenu.SetHelpContext(Value: Integer);
+begin
+end;
+
+procedure TEWAddMonitorMenu.SetName(const Value: string);
+begin
+end;
+
+procedure TEWAddMonitorMenu.SetParent(const Value: string);
+begin
+end;
+
+procedure TEWAddMonitorMenu.SetPosition(Value: Integer);
+begin
+end;
+
+procedure TEWAddMonitorMenu.SetVerb(const Value: string);
+begin
+end;
+
+function TEWAddMonitorMenu.GetIsMultiSelectable: Boolean;
+begin
+  Result := False;
+end;
+
+procedure TEWAddMonitorMenu.SetIsMultiSelectable(Value: Boolean);
+begin
+end;
+
+procedure TEWAddMonitorMenu.Execute(const MenuContextList: IInterfaceList);
+begin
+  EWAddMonitoring(FProject);
+end;
+
+function TEWAddMonitorMenu.PreExecute(const MenuContextList: IInterfaceList): Boolean;
+begin
+  Result := True;
+end;
+
+function TEWAddMonitorMenu.PostExecute(const MenuContextList: IInterfaceList): Boolean;
+begin
+  Result := True;
+end;
+
 // Feeds the project manager: one toggle item per project container.
 constructor TEWMenuNotifier.Create;
 begin
@@ -603,7 +875,10 @@ procedure TEWMenuNotifier.AddMenu(const AProject: IOTAProject;
 begin
   if (not AIsMultiSelect) and Assigned(AProject) and
      (AIdentList.IndexOf(sProjectContainer) >= 0) then
+  begin
     AProjectManagerMenuList.Add(TEWProjectMenu.Create(AProject));
+    AProjectManagerMenuList.Add(TEWAddMonitorMenu.Create(AProject));
+  end;
 end;
 
 procedure RegisterMenuNotifier;
