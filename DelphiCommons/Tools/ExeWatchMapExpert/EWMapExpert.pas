@@ -323,7 +323,7 @@ begin
     AfterUses := BufferText.Substring(UsesPos - 1 + 4);  // from the keyword's end
     BreakWalk := 0;
     while (BreakWalk < Length(AfterUses)) and
-          (AfterUses[BreakWalk + 1] in [#13, #10]) do
+          CharInSet(AfterUses[BreakWalk + 1], [#13, #10]) do
       Inc(BreakWalk);
     Writer := Editor.CreateUndoableWriter;
     try
