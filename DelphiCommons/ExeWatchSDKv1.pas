@@ -885,14 +885,20 @@ function EWTestModuleInfoForAddress(AAddress: NativeUInt): TSTModuleInfo;
 /// </summary>
 function EWTestResolveAddress(AAddress: NativeUInt): string;
 /// <summary>
-///   Exposed for the test project only: counts the public symbols inside the
-///   EXEWATCH_MAP resource of a module (0 = no usable resource there).
+///   Exposed for the test project only: counts the public symbols in a
+///   module's embedded map (.ewmap section first, then the RCDATA resource;
+///   0 = no usable embedded map there).
 /// </summary>
 function EWTestCountEmbeddedMapSymbols(AModule: THandle): Integer;
 /// <summary>
+///   Exposed for the test project only: reads the .ewmap section alone, so a
+///   test can tell that storage form apart from the resource and file forms.
+/// </summary>
+function EWTestSectionMapText(AModule: THandle): string;
+/// <summary>
 ///   Exposed for the test project only: the runtime's own symbol-text reader
-///   for a module (resource first, .map file second), so a test can prove
-///   which source a resolution would come from.
+///   for a module (embedded section, then resource, then the .map file beside
+///   it), so a test can prove which source a resolution would come from.
 /// </summary>
 function EWTestModuleText(AModule: THandle): string;
 {$IFDEF CPUX86}
@@ -5849,10 +5855,14 @@ const
   // resolve anything more than 16 MB past the module base - a real limit for a
   // large executable, and invisible when it bites.
   ST_ADDR_SLACK = $10000;
-  // The .map is linked INTO the executable as this RCDATA resource (the
-  // EWMapInject tool and the ExeWatchMapExpert IDE expert do that at build
-  // time); an external .map file beside the module only backs it up during
-  // development.
+  // The .map is linked INTO the executable at build time; an external .map
+  // file beside the module only backs it up during development. Two storage
+  // forms are read, in this order: a dedicated .ewmap section appended by the
+  // build-time injectors (deterministic PE surgery, works for any section
+  // layout), then the RCDATA resource some tooling still produces.
+  EW_MAP_SECTION_NAME = '.ewmap';
+  // 16 stored bytes ('EXEWATCHMAPSIG1' is 15 characters, then one zero).
+  EW_MAP_SECTION_SIG: array[0..15] of AnsiChar = 'EXEWATCHMAPSIG1' + #0;
   EW_MAP_RESOURCE_NAME = 'EXEWATCH_MAP';
   // GetModuleHandleEx is not part of Winapi.Windows: local import constants.
   EW_GMHE_UNCHANGED_REFCOUNT = $2;
@@ -6309,8 +6319,100 @@ begin
   end;
 end;
 
-// Symbol text a module carries with it: first the RCDATA resource the build
-// linked in, then the plain .map file beside the module (development builds).
+// Map text shipped inside a module image as the dedicated .ewmap section,
+// appended by the build-time injectors: a 16-byte signature, then the map.
+// Pure memory walk of the in-place PE header, no resource APIs, both image
+// formats, and the payload counts as found only when it sits inside the
+// mounted image and starts with the exact signature.
+function STSectionMapText(AModule: THandle): string;
+var
+  ImageSize: NativeUInt;
+  DosHeader: PImageDosHeader;
+  Nt32: PImageNtHeaders32;
+  Nt64: PImageNtHeaders64;
+  SecCount, OptSize, I: Integer;
+  Sections: PImageSectionHeader;
+  Sec: PImageSectionHeader;
+  Match: Boolean;
+  K, DataSize, SigLen: Integer;
+  Data: PByte;
+  Bytes: TBytes;
+begin
+  Result := '';
+  if AModule = 0 then
+    Exit;
+  DosHeader := PImageDosHeader(NativeUInt(AModule));
+  if DosHeader^.e_magic <> IMAGE_DOS_SIGNATURE then
+    Exit;
+  Nt32 := PImageNtHeaders32(NativeUInt(AModule) + NativeUInt(DosHeader^._lfanew));
+  if Nt32^.Signature <> IMAGE_NT_SIGNATURE then
+    Exit;
+  case Nt32^.OptionalHeader.Magic of
+    IMAGE_NT_OPTIONAL_HDR32_MAGIC:
+      ImageSize := Nt32^.OptionalHeader.SizeOfImage;
+    IMAGE_NT_OPTIONAL_HDR64_MAGIC:
+      begin
+        Nt64 := PImageNtHeaders64(NativeUInt(AModule) + NativeUInt(DosHeader^._lfanew));
+        ImageSize := Nt64^.OptionalHeader.SizeOfImage;
+      end;
+  else
+    Exit;
+  end;
+  SecCount := Nt32^.FileHeader.NumberOfSections;
+  OptSize := Nt32^.FileHeader.SizeOfOptionalHeader;
+  if (SecCount < 1) or (SecCount > 96) or (OptSize = 0) then
+    Exit;
+  Sections := PImageSectionHeader(NativeUInt(@(Nt32^.OptionalHeader)) +
+    NativeUInt(OptSize));
+  SigLen := Length(EW_MAP_SECTION_SIG);
+  for I := 0 to SecCount - 1 do
+  begin
+    Sec := PImageSectionHeader(NativeUInt(Sections) +
+      NativeUInt(I) * NativeUInt(SizeOf(TImageSectionHeader)));
+    // Exact 8-byte field compare: '.ewmap' followed by zero padding. The
+    // shipped Name field is a Byte array, so compare through Ord.
+    Match := True;
+    for K := 0 to 7 do
+    begin
+      if K < Length(EW_MAP_SECTION_NAME) then
+      begin
+        if Sec.Name[K] <> Ord(EW_MAP_SECTION_NAME[K + 1]) then
+        begin
+          Match := False;
+          Break;
+        end;
+      end
+      else if Sec.Name[K] <> 0 then
+      begin
+        Match := False;
+        Break;
+      end;
+    end;
+    if not Match then
+      Continue;
+    // The payload must sit inside the mounted image, or not at all.
+    if (Sec.SizeOfRawData <= NativeUInt(SigLen)) or
+       ((ImageSize > 0) and
+        (NativeUInt(Sec.VirtualAddress) + Sec.SizeOfRawData > ImageSize)) then
+      Exit;
+    // VirtualSize is exactly signature + map length: the length written back.
+    DataSize := Integer(Sec.Misc.VirtualSize) - SigLen;
+    if (DataSize <= 0) or (DataSize > Integer(Sec.SizeOfRawData) - SigLen) then
+      Exit;
+    Data := PByte(NativeUInt(AModule) + NativeUInt(Sec.VirtualAddress));
+    if not CompareMem(Data, @EW_MAP_SECTION_SIG, SigLen) then
+      Exit;
+    Inc(Data, SigLen);
+    SetLength(Bytes, DataSize);
+    Move(Data^, Bytes[0], DataSize);
+    Result := TEncoding.Default.GetString(Bytes);
+    Exit;
+  end;
+end;
+
+// Symbol text a module carries with it: the embedded map first - the .ewmap
+// section the injectors append, then the RCDATA resource older tooling still
+// links - then the plain .map file beside the module (development builds).
 function STSymbolTextForModule(AModule: THandle): string;
 var
   ResInfo: HRSRC;
@@ -6323,6 +6425,11 @@ begin
   Result := '';
   if AModule = 0 then
     Exit;
+  // Form 1: the .ewmap section the build-time injectors append.
+  Result := STSectionMapText(AModule);
+  if Result <> '' then
+    Exit;
+  // Form 2: the RCDATA resource, for maps linked by other tooling.
   ResInfo := FindResource(AModule, EW_MAP_RESOURCE_NAME, RT_RCDATA);
   if ResInfo <> 0 then
   begin
@@ -6863,7 +6970,13 @@ begin
     (Pos('@HandleFinally', ALine) > 0) or
     (Pos('@HandleAnyException', ALine) > 0) or
     (Pos('@HandleOnException', ALine) > 0) or
-    // ExeWatch SDK internals
+    // ExeWatch SDK internals. The unit-name prefix filters EVERY frame the
+    // SDK itself raised through: hook procs sit next to the walk machinery
+    // and a source edit shifts their addresses, so a hand-list of proc names
+    // drifts out of date with each change (an SDK frame resolved to a
+    // neighbour hook and surfaced in user traces). User code can never
+    // legitimately resolve into this unit: the SDK lives only inside it.
+    (Pos('ExeWatchSDKv1.', ALine) > 0) or
     (Pos('ExeWatchGetExceptionStackInfo', ALine) > 0) or
     (Pos('ScanStackForTrace', ALine) > 0) or
     (Pos('GetStackTraceStr', ALine) > 0) or
@@ -7160,6 +7273,11 @@ begin
   Result := STResolveAddr(AAddress);
 end;
 
+function EWTestSectionMapText(AModule: THandle): string;
+begin
+  Result := STSectionMapText(AModule);
+end;
+
 function EWTestModuleText(AModule: THandle): string;
 begin
   STEnsureInit;
@@ -7224,6 +7342,10 @@ var
 begin
   Result := 0;
   if AModule = 0 then
+    Exit;
+  // The .ewmap section first: that is what this project's injectors produce.
+  Result := STCountMapSymbols(STSectionMapText(AModule));
+  if Result > 0 then
     Exit;
   ResInfo := FindResource(AModule, EW_MAP_RESOURCE_NAME, RT_RCDATA);
   if ResInfo = 0 then

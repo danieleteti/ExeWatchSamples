@@ -397,9 +397,18 @@ begin
       AddMsg(AProject, 'Map is empty: ' + MapFile);
     4,
     5:
-      AddMsg(AProject, Format('Resource injection failed on %s (exit %d; ' +
-        'if a debugger or antivirus keeps the file open, retry the build)',
+      AddMsg(AProject, Format('Map injection failed on %s (exit %d; if a ' +
+        'debugger or antivirus keeps the file open, retry the build)',
         [ExtractFileName(Target), Code]));
+    6:
+      AddMsg(AProject, Format('Map not linked into %s: the linker output is ' +
+        'not a valid Windows executable; rebuild the project first',
+        [ExtractFileName(Target)]));
+    7:
+      AddMsg(AProject, Format('Map not linked into %s: the PE header area has ' +
+        'no room for a section header; the runtime will fall back to the ' +
+        '.map file beside the executable',
+        [ExtractFileName(Target)]));
   end;
 end;
 
