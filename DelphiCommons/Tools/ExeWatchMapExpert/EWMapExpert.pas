@@ -87,8 +87,34 @@ type
     function PostExecute(const MenuContextList: IInterfaceList): Boolean;
   end;
 
-  TEWMapExpert = class(TInterfacedObject, IOTAWizard,
-    IOTAIDENotifier, IOTAIDENotifier50, IOTAIDENotifier80)
+  // The build notifier as its OWN object: one registration, one release.
+  // The wizard object used to double as the build notifier (registered as
+  // both a wizard and an IOTAIDENotifier): two registrations on one instance
+  // meant two IDE releases at uninstall, and the RTL's machinery read the
+  // freed memory. Its lifetime = the registration window: the expert's
+  // destructor unregisters it before dropping the last reference.
+  TEWBuildNotifier = class(TNotifierObject, IOTAIDENotifier,
+    IOTAIDENotifier50, IOTAIDENotifier80)
+  private
+    FExpert: TEWMapExpert;
+  public
+    constructor Create(AExpert: TEWMapExpert);
+    { IOTAIDENotifier }
+    procedure FileNotification(NotifyCode: TOTAFileNotification;
+      const FileName: string; var Cancel: Boolean);
+    procedure BeforeCompile(const AProject: IOTAProject;
+      var Cancel: Boolean); overload;
+    procedure AfterCompile(Succeeded: Boolean); overload;
+    { IOTAIDENotifier50 }
+    procedure BeforeCompile(const AProject: IOTAProject;
+      IsCodeInsight: Boolean; var Cancel: Boolean); overload;
+    procedure AfterCompile(Succeeded: Boolean; IsCodeInsight: Boolean); overload;
+    { IOTAIDENotifier80 }
+    procedure AfterCompile(const AProject: IOTAProject; Succeeded: Boolean;
+      IsCodeInsight: Boolean); overload;
+  end;
+
+  TEWMapExpert = class(TInterfacedObject, IOTAWizard)
   private
     FNotifierIndex: Integer;
     procedure AddMsg(const AProject: IOTAProject; const AMsg: string);
@@ -111,19 +137,6 @@ type
     function GetIDString: string;
     function GetName: string;
     function GetState: TWizardState;
-    { IOTAIDENotifier }
-    procedure FileNotification(NotifyCode: TOTAFileNotification;
-      const FileName: string; var Cancel: Boolean);
-    procedure BeforeCompile(const AProject: IOTAProject;
-      var Cancel: Boolean); overload;
-    procedure AfterCompile(Succeeded: Boolean); overload;
-    { IOTAIDENotifier50 }
-    procedure BeforeCompile(const AProject: IOTAProject;
-      IsCodeInsight: Boolean; var Cancel: Boolean); overload;
-    procedure AfterCompile(Succeeded: Boolean; IsCodeInsight: Boolean); overload;
-    { IOTAIDENotifier80 }
-    procedure AfterCompile(const AProject: IOTAProject; Succeeded: Boolean;
-      IsCodeInsight: Boolean); overload;
   end;
 
 procedure Register;
@@ -176,12 +189,19 @@ type
 var
   GMenuNotifierIndex: Integer = -1;
 
+constructor TEWBuildNotifier.Create(AExpert: TEWMapExpert);
+begin
+  inherited Create;
+  FExpert := AExpert;
+end;
+
 constructor TEWMapExpert.Create;
 begin
   inherited Create;
   FNotifierIndex := -1;
   try
-    FNotifierIndex := (BorlandIDEServices as IOTAServices).AddNotifier(Self);
+    FNotifierIndex := (BorlandIDEServices as IOTAServices).AddNotifier(
+      TEWBuildNotifier.Create(Self));
   except
     // Without the notifier the expert simply does nothing; installing it is
     // not worth a broken IDE startup.
@@ -350,22 +370,6 @@ end;
 procedure TEWMapExpert.AddMsg(const AProject: IOTAProject; const AMsg: string);
 begin
   EWAddMsg(AProject, AMsg);
-end;
-
-procedure TEWMapExpert.AfterSave;
-begin
-end;
-
-procedure TEWMapExpert.BeforeSave;
-begin
-end;
-
-procedure TEWMapExpert.Destroyed;
-begin
-end;
-
-procedure TEWMapExpert.Modified;
-begin
 end;
 
 procedure TEWMapExpert.Execute;
@@ -605,21 +609,37 @@ begin
   Result := [wsEnabled];
 end;
 
-procedure TEWMapExpert.FileNotification(NotifyCode: TOTAFileNotification;
+procedure TEWMapExpert.AfterSave;
+begin
+end;
+
+procedure TEWMapExpert.BeforeSave;
+begin
+end;
+
+procedure TEWMapExpert.Destroyed;
+begin
+end;
+
+procedure TEWMapExpert.Modified;
+begin
+end;
+
+procedure TEWBuildNotifier.FileNotification(NotifyCode: TOTAFileNotification;
   const FileName: string; var Cancel: Boolean);
 begin
 end;
 
-procedure TEWMapExpert.BeforeCompile(const AProject: IOTAProject;
+procedure TEWBuildNotifier.BeforeCompile(const AProject: IOTAProject;
   var Cancel: Boolean);
 begin
 end;
 
-procedure TEWMapExpert.AfterCompile(Succeeded: Boolean);
+procedure TEWBuildNotifier.AfterCompile(Succeeded: Boolean);
 begin
 end;
 
-procedure TEWMapExpert.BeforeCompile(const AProject: IOTAProject;
+procedure TEWBuildNotifier.BeforeCompile(const AProject: IOTAProject;
   IsCodeInsight: Boolean; var Cancel: Boolean);
 begin
   if IsCodeInsight then
@@ -627,31 +647,31 @@ begin
   // Only projects that link the SDK: outside them the expert must be a
   // silent no-op, not an option force that leaves .map files behind every
   // unrelated build of the user's IDE.
-  if not ProjectLinksExeWatch(AProject) then
+  if not FExpert.ProjectLinksExeWatch(AProject) then
     Exit;
   try
-    if MapLinkWanted(AProject) then
-      ForceMapOption(AProject);
+    if FExpert.MapLinkWanted(AProject) then
+      FExpert.ForceMapOption(AProject);
   except
     // A failed option read keeps the project's own settings; the build goes on.
   end;
 end;
 
-procedure TEWMapExpert.AfterCompile(Succeeded: Boolean;
+procedure TEWBuildNotifier.AfterCompile(Succeeded: Boolean;
   IsCodeInsight: Boolean);
 begin
 end;
 
-procedure TEWMapExpert.AfterCompile(const AProject: IOTAProject;
+procedure TEWBuildNotifier.AfterCompile(const AProject: IOTAProject;
   Succeeded: Boolean; IsCodeInsight: Boolean);
 begin
   if IsCodeInsight or (not Succeeded) then
     Exit;
   try
-    ProcessProject(AProject);
+    FExpert.ProcessProject(AProject);
   except
     on E: Exception do
-      AddMsg(AProject, 'Internal error: ' + E.ClassName + ': ' + E.Message);
+      EWAddMsg(AProject, 'Internal error: ' + E.ClassName + ': ' + E.Message);
   end;
 end;
 
