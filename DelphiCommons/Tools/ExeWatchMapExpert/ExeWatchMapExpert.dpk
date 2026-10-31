@@ -21,7 +21,7 @@ package ExeWatchMapExpert;
 
 {$DESCRIPTION 'ExeWatch map linker - links the .map into the binary at build end'}
 
-{$RUNONLY}
+{$DESIGNONLY}
 
 requires
   rtl,
