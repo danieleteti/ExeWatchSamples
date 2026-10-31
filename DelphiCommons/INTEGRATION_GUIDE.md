@@ -591,6 +591,26 @@ Notes: inject **before** Authenticode signing (the appended section
 invalidates an existing signature); the binary grows by the size of the map;
 the embedded map wins over the side file.
 
+### What changes when the linker/compiler settings change
+
+Nothing breaks. A matrix of 32 real builds (Delphi 12 + 13, Win32 + Win64)
+over the combinations of stack frames `{$W+/-}`, optimization and checks,
+runtime packages, debug info and the four map settings is documented in
+[STACKTRACE_MATRIX.md](STACKTRACE_MATRIX.md): only what the trace can
+RESOLVE changes, never the ability to build, run, raise, capture or ship.
+
+## Stack trace and the DLL SDK
+
+The DLL captures exceptions raised inside its own code and inside a host
+that runs the same Delphi RTL. Frames from other modules resolve through
+their module: PE exports (`module!Export+0xN`) or `module+0xN`. The DLL's
+own frames symbolize when the DLL is built with a map and the map is linked
+into the DLL with the same tool (`ExeWatchMapCLI.exe <dll> <dll>.map`).
+
+A host with a different runtime (MSVC, Python) gets NO stack trace for its
+own exceptions today: the OS raises those through a filter the Delphi RTL
+never sees. Capturing those is a separate planned feature.
+
 ## References
 
 - **SDK Version:** v0.15.0+
