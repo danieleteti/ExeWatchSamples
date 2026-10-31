@@ -1,6 +1,7 @@
 package ExeWatchMapExpert;
 
 {$R *.res}
+{$R 'ExeWatchSplash.res' 'ExeWatchSplash.rc'}
 {$ALIGN 8}
 {$ASSERTIONS ON}
 {$BOOLEVAL OFF}
@@ -29,6 +30,7 @@ requires
 
 contains
   EWMapExpert in 'EWMapExpert.pas',
+  EWMapSplash in 'EWMapSplash.pas',
   EWMapInjectU in '..\EWMapInjectU.pas';
 
 end.
