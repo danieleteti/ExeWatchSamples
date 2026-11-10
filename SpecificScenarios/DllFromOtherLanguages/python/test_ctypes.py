@@ -87,7 +87,8 @@ class TEWDLLConfig(Structure):
         ('SampleRate',               c_double),
         ('GaugeSamplingIntervalSec', c_int),
         ('MaxPendingAgeDays',        c_int),
-        ('AnonymizeDeviceId',        BOOL),
+        ('AnonymizeDeviceId',        BOOL),   # kept in the layout since ABI 5, ignored
+        ('DisableAnonymization',     BOOL),   # ABI 5. 0 (default) = no user or computer names are sent
     ]
 
 
@@ -127,7 +128,7 @@ def main() -> int:
     # --- Axes 1 + 2: stdcall + undecorated names ---
     abi = dll.ew_GetABIVersion()
     print(f'[axis 1+2] ew_GetABIVersion() = {abi}')
-    assert abi == 2, f'ABI mismatch: header expects 2, DLL reports {abi}'
+    assert abi == 5, f'ABI mismatch: header expects 5, DLL reports {abi}'
 
     # --- Axis 3: wchar_t* round-trip ---
     buf = create_unicode_buffer(128)
@@ -157,6 +158,7 @@ def main() -> int:
     cfg.AppVersion = '0.1.0'
     cfg.SampleRate = 1.0
     cfg.MaxPendingAgeDays = -1
+    cfg.DisableAnonymization = 0   # privacy on, like every ExeWatch SDK; 1 sends names and paths as they are
 
     rc = dll.ew_InitializeEx(byref(cfg))
     print(f'[axis 4]   ew_InitializeEx rc={rc}')

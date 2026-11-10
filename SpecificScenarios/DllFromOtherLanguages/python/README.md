@@ -42,7 +42,7 @@ The script walks through all five Windows ABI axes explicitly. Each is labelled 
 |------|----------------|
 | 1. Calling convention   | `WinDLL` = stdcall. If it were wrong, `ew_GetABIVersion` would crash or return garbage. |
 | 2. Name decoration      | `GetProcAddress("ew_Info")` with plain names. If the DLL mangled them (e.g. `_ew_Info@8`), ctypes would fail to resolve. |
-| 3. String marshalling   | `c_wchar_p` = UTF-16 LE `wchar_t*`. `ew_GetVersion` roundtrips `'0.21.0'` through a buffer. |
+| 3. String marshalling   | `c_wchar_p` = UTF-16 LE `wchar_t*`. `ew_GetVersion` roundtrips `'0.26.0'` through a buffer. |
 | 4. Struct packing       | `TEWDLLConfig` with `_pack_=1`. If packing mismatches, `ew_InitializeEx` returns `EW_ERR_VERSION_MISMATCH` (-6). |
 | 5. Callback ABI         | `WINFUNCTYPE` = stdcall callback. `ew_SetOnError` registers a Python function as the DLL's error sink. |
 
@@ -53,10 +53,10 @@ If all five pass, the DLL is genuinely language-agnostic — any language with a
 ```
 Loading .../ExeWatchSDKv1DLL_x64.dll
 Loaded. handle=0x...
-[axis 1+2] ew_GetABIVersion() = 2
-[axis 3]   ew_GetVersion rc=0, version='0.21.0'
+[axis 1+2] ew_GetABIVersion() = 5
+[axis 3]   ew_GetVersion rc=0, version='0.26.0'
 [axis 5]   ew_SetOnError rc=0
-[axis 4]   sizeof(TEWDLLConfig) = 68 bytes
+[axis 4]   sizeof(TEWDLLConfig) = 72 bytes
 [axis 4]   ew_InitializeEx rc=0
            ew_GetPendingCount = 4
 All five ABI axes validated — Python ctypes <-> ExeWatch DLL works.

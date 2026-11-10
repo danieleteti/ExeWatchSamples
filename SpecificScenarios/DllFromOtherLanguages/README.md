@@ -23,10 +23,10 @@ Every function call touches at least one of these. The two scripts label them `[
 
 | Axis | Broken looks like | Test |
 |------|-------------------|------|
-| 1. Calling convention (stdcall) | Stack imbalance, crash, garbage return | `ew_GetABIVersion() == 2` |
+| 1. Calling convention (stdcall) | Stack imbalance, crash, garbage return | `ew_GetABIVersion() == 5` |
 | 2. Name decoration (undecorated) | `GetProcAddress` returns NULL | `GetProcAddress("ew_Info")` resolves |
-| 3. String marshalling (UTF-16 `wchar_t*`) | Mojibake in the dashboard | `ew_GetVersion` fills a `wchar_t[]` with `"0.21.0"` |
-| 4. Struct packing (`#pragma pack(1)`) | `ew_InitializeEx` returns `EW_ERR_VERSION_MISMATCH` (-6) | `sizeof(TEWDLLConfig) == 68` and `InitializeEx` returns 0 |
+| 3. String marshalling (UTF-16 `wchar_t*`) | Mojibake in the dashboard | `ew_GetVersion` fills a `wchar_t[]` with `"0.26.0"` |
+| 4. Struct packing (`#pragma pack(1)`) | `ew_InitializeEx` returns `EW_ERR_VERSION_MISMATCH` (-6) | `sizeof(TEWDLLConfig) == 72` and `InitializeEx` returns 0 |
 | 5. Callback ABI (`__stdcall` fn pointer) | Stack crash when the DLL fires the callback | `ew_SetOnError(on_error)` + trigger an error |
 
 If all five pass on both MSVC and Python, the DLL is genuinely language-agnostic.
