@@ -33,6 +33,7 @@ implementation
 {$R *.dfm}
 
 uses
+  ExeWatchSDKv1,
   ControllerU,
   System.IOUtils,
   MVCFramework.Commons,
@@ -41,8 +42,7 @@ uses
   MVCFramework.View.Renderers.TemplatePro,
   MVCFramework.Middleware.Redirect,
   MVCFramework.Middleware.StaticFiles,
-  MVCFramework.HTMX,
-  ExeWatchSDKv1;
+  MVCFramework.HTMX;
 
 procedure TMyWebModule.WebModuleCreate(Sender: TObject);
 var

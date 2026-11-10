@@ -1,4 +1,4 @@
-// ***************************************************************************
+﻿// ***************************************************************************
 //
 // ExeWatch - DMVCFramework Integration Sample
 //
@@ -152,14 +152,14 @@ type
 implementation
 
 uses
+  ExeWatchSDKv1,
   System.SysUtils,
   System.StrUtils,
   System.DateUtils,
   System.JSON,
   System.SyncObjs,
   System.Math,
-  MVCFramework.Logger,
-  ExeWatchSDKv1;
+  MVCFramework.Logger;
 
 var
   GRequestCount: Int64 = 0;

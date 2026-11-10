@@ -30,14 +30,10 @@ uses
   EntitiesU in 'EntitiesU.pas',
   ServicesU in 'ServicesU.pas',
   WebModuleU in 'WebModuleU.pas' {MyWebModule: TWebModule},
-  // ExeWatch SDK — single-file, zero dependencies
-  ExeWatchSDKv1 in '..\DelphiCommons\ExeWatchSDKv1.pas';
+  ExeWatchConfig in 'ExeWatchConfig.pas',
+  ExeWatchSDKv1;
 
 {$R *.res}
-
-const
-  // Replace with your actual API key from the ExeWatch dashboard
-  EXEWATCH_API_KEY = 'YOUR_EXEWATCH_APIKEY';
 
 procedure RunServer(APort: Integer);
 var
@@ -79,19 +75,6 @@ begin
   WriteLn('==========================================');
   WriteLn('');
 
-  // --- ExeWatch API key check ---
-  if EXEWATCH_API_KEY = 'YOUR_EXEWATCH_APIKEY' then
-  begin
-    WriteLn('ERROR: API key not configured!');
-    WriteLn('');
-    WriteLn('Open DelphiDMVCFramework.dpr and replace "YOUR_EXEWATCH_APIKEY"');
-    WriteLn('with your actual API key from: https://exewatch.com');
-    WriteLn('');
-    WriteLn('Press Enter to exit.');
-    ReadLn;
-    Exit;
-  end;
-
   // -------------------------------------------------------------------------
   //  ExeWatch integration with DMVCFramework logging
   //
@@ -126,10 +109,7 @@ begin
 
   // --- Initialize ExeWatch SDK ---
   WriteLn('Initializing ExeWatch SDK...');
-  InitializeExeWatch(TExeWatchConfig.Create(
-    EXEWATCH_API_KEY,
-    'dmvc_sample_customer'
-  ));
+  StartExeWatch('dmvc_sample_customer');
 
   // Set global tags for all log entries
   EW.SetTag('framework', 'dmvcframework');
@@ -181,4 +161,5 @@ begin
       LogF(E.ClassName + ': ' + E.Message);
     end;
   end;
+  FlushExeWatch();
 end.
