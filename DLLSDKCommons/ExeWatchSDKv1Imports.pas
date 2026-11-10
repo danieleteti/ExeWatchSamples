@@ -89,7 +89,7 @@ const
   // StructSize). Bump BOTH this and EW_DLL_ABI_VERSION when adding exports.
   // A genuinely breaking change would need a new compatibility strategy
   // (the forward-compatible `>=` check assumes additive-only evolution).
-  EW_IMPORT_ABI_VERSION = 4;
+  EW_IMPORT_ABI_VERSION = 5;
 
 type
   // --- Config record (must match DLL exactly) ---
@@ -106,7 +106,8 @@ type
     SampleRate: Double;
     GaugeSamplingIntervalSec: Integer;
     MaxPendingAgeDays: Integer;
-    AnonymizeDeviceId: LongBool;
+    AnonymizeDeviceId: LongBool;     // ignored since ABI 5, kept so that the layout does not move
+    DisableAnonymization: LongBool;  // ABI 5. 0 (default) = anonymized; non-zero = names and paths in clear
   end;
 
   // --- Callback types ---
@@ -380,6 +381,7 @@ begin
   FillChar(Config, SizeOf(Config), 0);
   Config.StructSize := SizeOf(TEWDLLConfig);
   Config.MaxPendingAgeDays := -1;  // -1 = DLL uses default (7 days)
+  // DisableAnonymization stays 0: anonymized, the same default as every other SDK.
 end;
 
 function EWGetLastErrorStr: WideString;

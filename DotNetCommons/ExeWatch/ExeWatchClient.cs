@@ -95,6 +95,12 @@ public sealed class ExeWatchClient : IDisposable
         var deviceId = config.AnonymizeDeviceId
             ? PlatformHelper.AnonymizeDeviceId(username, hostname)
             : PlatformHelper.GetDeviceId();
+        if (config.AnonymizeDeviceId)
+        {
+            // The payload carries the same two hashes the device id is made of: the real names never leave the machine.
+            username = PlatformHelper.AnonymizeUsername(username);
+            hostname = PlatformHelper.AnonymizeUsername(hostname);
+        }
         _deviceInfo = new DeviceInfo
         {
             DeviceId = deviceId,
@@ -739,6 +745,8 @@ public sealed class ExeWatchClient : IDisposable
         try
         {
             var hardware = SystemInfoCollector.Collect();
+            if (_config.AnonymizeDeviceId)
+                PathScrubber.Anonymize(hardware, PathScrubber.GetUserPathRoots(), PathScrubber.PathsAreCaseSensitive);
 
             Dictionary<string, string>? customInfo = null;
             lock (_customDeviceInfoLock)

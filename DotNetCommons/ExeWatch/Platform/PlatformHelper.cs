@@ -3,7 +3,6 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 
 namespace ExeWatch.Platform;
 
@@ -32,13 +31,25 @@ internal static class PlatformHelper
         return $"{username}@unknown";
     }
 
+    /// <summary>
+    /// FNV-1a 32 bit over the UTF-8 bytes, as 8 lowercase hex digits. The same function, with the same
+    /// result, as the Delphi, DLL and Python SDKs: the same user and the same machine give the same
+    /// value in all of them. It is a pseudonym, not a cipher.
+    /// </summary>
     public static string AnonymizeUsername(string username)
     {
         if (string.IsNullOrEmpty(username))
             return "anonymous";
-        var bytes = System.Text.Encoding.UTF8.GetBytes(username);
-        var hash = SHA1.HashData(bytes);
-        return Convert.ToHexString(hash).ToLowerInvariant()[..8];
+        unchecked
+        {
+            uint hash = 2166136261;
+            foreach (var b in System.Text.Encoding.UTF8.GetBytes(username))
+            {
+                hash ^= b;
+                hash *= 16777619;
+            }
+            return hash.ToString("x8");
+        }
     }
 
     /// <summary>

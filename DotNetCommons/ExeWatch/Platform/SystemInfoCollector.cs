@@ -64,6 +64,10 @@ internal static class SystemInfoCollector
                     info.AvailablePhysicalMemory = (long)memStatus.ullAvailPhys;
                 }
             }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                (info.TotalPhysicalMemory, info.AvailablePhysicalMemory) = LinuxSystemInfo.ReadMemory();
+            }
         }
         catch { }
     }
@@ -90,17 +94,36 @@ internal static class SystemInfoCollector
                 // But registry subkeys give us logical count too, so use Environment.ProcessorCount
                 info.CpuCores = coreCount > 0 ? coreCount : Environment.ProcessorCount;
             }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                (info.CpuName, info.CpuCores) = LinuxSystemInfo.ReadCpu();
+            }
         }
         catch { }
+
+        // Whatever the system did not say (ARM Linux, macOS): the logical count is the best figure left.
+        if (info.CpuCores == 0)
+            info.CpuCores = Environment.ProcessorCount;
     }
 
     private static void CollectDisks(HardwareInfo info)
     {
-        try
+        DriveInfo[] drives;
+        try { drives = DriveInfo.GetDrives(); }
+        catch { return; }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var drive in drives)
         {
-            foreach (var drive in DriveInfo.GetDrives())
+            // One mount that raises (a FUSE mount, a dead share) must not take the others with it.
+            try
             {
                 if (!drive.IsReady) continue;
+                if (!seen.Add(drive.Name)) continue;
+                // On Linux the list also holds the kernel's own mounts (proc, tmpfs, cgroup...): not disks.
+                if (OperatingSystem.IsLinux() &&
+                    (LinuxSystemInfo.IsPseudoFileSystem(drive.DriveFormat) || drive.TotalSize == 0))
+                    continue;
                 info.Disks.Add(new DiskInfo
                 {
                     Drive = drive.Name.TrimEnd('\\'),
@@ -119,8 +142,8 @@ internal static class SystemInfoCollector
                     }
                 });
             }
+            catch { }
         }
-        catch { }
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]

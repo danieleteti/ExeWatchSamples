@@ -101,7 +101,7 @@ extern "C" {
    drops in under code built against an older header without recompiling.
    Maintainers: keep every ABI bump ADDITIVE (only add exports; never change an
    existing export's signature or a shared struct layout). */
-#define EW_IMPORT_ABI_VERSION 4
+#define EW_IMPORT_ABI_VERSION 5
 
 /* --- DLL name --- */
 #ifdef _WIN64
@@ -124,7 +124,9 @@ typedef struct {
     double      SampleRate;
     int         GaugeSamplingIntervalSec;
     int         MaxPendingAgeDays;
-    BOOL        AnonymizeDeviceId;
+    BOOL        AnonymizeDeviceId;     /* ignored since ABI 5, kept so that the layout does not move */
+    BOOL        DisableAnonymization;  /* ABI 5. 0 (default) = nothing that names a person is sent, like every
+                                          other ExeWatch SDK. Non-zero = send names and paths as they are. */
 } TEWDLLConfig;
 #pragma pack(pop)
 

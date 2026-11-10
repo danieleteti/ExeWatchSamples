@@ -17,6 +17,11 @@
 
 unit ExeWatchSDKv1.FMX;
 
+// Overflow and range checks belong to the calling project (every Debug
+// configuration turns them on); the SDK units do not depend on them.
+{$OVERFLOWCHECKS OFF}
+{$RANGECHECKS OFF}
+
 interface
 
 implementation

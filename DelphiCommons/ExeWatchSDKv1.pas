@@ -30,6 +30,14 @@
 
 unit ExeWatchSDKv1;
 
+// Overflow and range checks belong to the CALLING project, and every Debug
+// configuration turns them on. This unit's address arithmetic wraps on purpose
+// and was validated without the checks: left on, an EIntOverflow inside the
+// symbol builder stopped it half way and no trace of the application ever
+// resolved again. They are off for this file whatever the host project says.
+{$OVERFLOWCHECKS OFF}
+{$RANGECHECKS OFF}
+
 interface
 
 uses
@@ -46,7 +54,7 @@ uses
   System.Diagnostics;  // For TStopwatch (high-precision timing)
 
 const
-  EXEWATCH_SDK_VERSION = '0.25.0';
+  EXEWATCH_SDK_VERSION = '0.26.0';
   EXEWATCH_API_VERSION = 'v1';  // API version this SDK targets
   {$IF NOT DEFINED(LOCAL_EXEWATCH)}
   EXEWATCH_ENDPOINT = 'https://exewatch.com';
@@ -264,6 +272,15 @@ type
     function ToJSON: TJSONObject;
   end;
 
+  /// <summary>
+  ///   A folder that identifies the user (the profile, the application data) and the token that
+  ///   stands in for it when AnonymizeDeviceId is on, e.g. ('[USERPROFILE]', 'C:\Users\bob').
+  /// </summary>
+  TEWPathRoot = record
+    Token: string;
+    Value: string;
+  end;
+
   THardwareInfo = record
     // Memory
     TotalPhysicalMemory: Int64;
@@ -319,6 +336,11 @@ type
     AppVersionInfo: TAppVersionInfo;
     // Helpers
     class function Collect: THardwareInfo; static;
+    /// <summary>
+    ///   Removes what names a person: user folders in the paths and the command line become
+    ///   their tokens, local IP addresses and volume names are dropped.
+    /// </summary>
+    procedure Anonymize(const ARoots: TArray<TEWPathRoot>; ACaseSensitive: Boolean);
     function ToJSON: TJSONObject;
   end;
 
@@ -367,10 +389,16 @@ type
     /// </summary>
     MaxPendingAgeDays: Integer;
     /// <summary>
-    /// When True, the username portion of DeviceId is replaced with its SHA-1 hash.
-    /// e.g., "mario.rossi@PC01" becomes "a1b2c3d4...@PC01".
-    /// Useful for GDPR compliance in Active Directory environments.
-    /// Requires Delphi 10.2 Tokyo+; ignored on older versions.
+    /// On by default. Nothing that names a person leaves the machine:
+    /// - Username and Hostname are sent as their FNV-1a hash (8 hex characters), the same
+    ///   two hashes DeviceId is made of: "mario.rossi@PC01" becomes "a1b2c3d4@0f1e2d3c";
+    /// - in the executable path, the working directory and the command line, a folder that
+    ///   belongs to the user (USERPROFILE, APPDATA, LOCALAPPDATA, TEMP; HOME elsewhere) is
+    ///   replaced by its name between square brackets: "[USERPROFILE]\app\app.exe";
+    /// - local IP addresses and volume names are not sent.
+    /// The hash is deterministic, so the same user and the same machine always give the same
+    /// value. It is a pseudonym, not a cipher. Names of other people inside command line
+    /// arguments are not recognized. Set to False to send everything as it is.
     /// </summary>
     AnonymizeDeviceId: Boolean;
     /// <summary>
@@ -490,6 +518,7 @@ type
     procedure DoError(const AMessage: string);
     procedure DoLogsSent(AAccepted, ARejected: Integer);
     procedure DoDeviceInfoSent(ASuccess: Boolean; const AErrorMessage: string);
+    procedure DoCustomDeviceInfoSent(ASuccess: Boolean; const AErrorMessage: string);
     function GetNextFileName: string;
     procedure PersistBuffer;
     function GetPendingLogFiles: TArray<string>;
@@ -501,6 +530,12 @@ type
   public
     constructor Create(const AConfig: TExeWatchConfig);
     destructor Destroy; override;
+
+    /// <summary>
+    /// The content of the device file (device, hardware, custom info) exactly as it is queued.
+    /// The caller owns the result. Public so that tests can read it without going through the disk.
+    /// </summary>
+    function BuildDeviceInfoFile: TJSONObject;
 
     procedure Log(ALevel: TEWLogLevel; const AMessage: string;
       const ATag: string = 'main'; AExtraData: TJSONObject = nil); overload;
@@ -802,17 +837,39 @@ type
     class function GetOSVersion: string;
     class function GetDeviceId: string;
     class function AnonymizeUsername(const AUsername: string): string;
+    /// <summary>
+    ///   The folders of the current user that appear in paths: USERPROFILE, APPDATA, LOCALAPPDATA
+    ///   and TEMP on Windows, HOME elsewhere. Empty values are left out.
+    /// </summary>
+    class function GetUserPathRoots: TArray<TEWPathRoot>;
+    /// <summary>
+    ///   Replaces, anywhere in AText, a path that starts with one of the roots by its token
+    ///   (longest root first). The root has to end at a separator, at a delimiter or at the end of
+    ///   the text, and not start in the middle of a name. '/' and '\' are the same separator.
+    /// </summary>
+    class function ScrubUserPaths(const AText: string; const ARoots: TArray<TEWPathRoot>;
+      ACaseSensitive: Boolean): string;
     class function GetDefaultStoragePath(const AApiKey: string = ''): string;
     class function GetTimezoneOffset: string;  // Returns offset like "+01:00" or "-05:00"
     class function GetAppVersionInfo: TAppVersionInfo;  // Auto-reads from current exe
     class function GetCurrentProcessId: Cardinal;
   end;
 
+/// <summary>
+///   The parsers behind the Linux hardware readers. Pure text in, text out, so they are public for the
+///   tests and run on every system.
+/// </summary>
+function EWParseCpuModelName(const AText: string): string;
+function EWIsPseudoFileSystem(const AFileSystem: string): Boolean;
+function EWIsNetworkFileSystem(const AFileSystem: string): Boolean;
+function EWParseMountLine(const ALine: string; out ADevice, AMountPoint, AFileSystem: string): Boolean;
+function EWBlockDeviceName(const ADevice: string): string;
+
 function ExeWatch: TExeWatch;
 function EW: TExeWatch; inline;  // Short alias for ExeWatch
 function ExeWatchIsInitialized: Boolean;
 function _ExeWatch: TExeWatch; inline;  // Alias to avoid name conflict with unit name
-procedure InitializeExeWatch(const AApiKey, ACustomerId: string; AAppVersion: String = ''; AAnonymizeDeviceId: Boolean = False); overload;
+procedure InitializeExeWatch(const AApiKey, ACustomerId: string; AAppVersion: String = ''; AAnonymizeDeviceId: Boolean = True); overload;
 procedure InitializeExeWatch(const AConfig: TExeWatchConfig); overload;
 procedure FinalizeExeWatch;
 
@@ -830,6 +887,16 @@ procedure ExeWatchRegisterFrameworkHook;
 // Internal: used by ExeWatchSDKv1.VCL/FMX hooks — not part of the public API
 function GetStackTraceStr(FramesToSkip: Integer = 0): string;
 function GetNoStackTraceReason: Integer;
+// Where the host module's symbols come from: 'embedded' (.ewmap section or
+// EXEWATCH_MAP resource, travels with the binary), 'map_file' (a .map beside
+// the exe: works on the developer's machine, not on the customer's) or 'none'.
+// Two more say the exe DOES carry a map this SDK cannot use:
+// 'unsupported_map_format' (linked by a newer tool than this SDK: update the
+// SDK) and 'corrupt_map'. Empty where traces are not supported.
+function GetSymbolSource: string;
+// Adds 'symbol_source' to the extra data of an event that carries a stack
+// trace, so the console can tell an unreadable trace from a readable one.
+procedure AttachSymbolSource(AExtraData: TJSONObject);
 // The trace lives on the exception object, so the caller must say which
 // exception it is asking about. No default: a nil argument can only ever
 // return an empty string, and the compiler should say so.
@@ -896,11 +963,39 @@ function EWTestCountEmbeddedMapSymbols(AModule: THandle): Integer;
 /// </summary>
 function EWTestSectionMapText(AModule: THandle): string;
 /// <summary>
+///   Exposed for the test project only: the .ewmap payload decoder on raw
+///   bytes (header, then the stored map), so a test can feed it formats no
+///   injector writes. Returns Ord(TSTMapStatus): 0 ok, 2 unsupported, 3 corrupt.
+/// </summary>
+function EWTestDecodeMapPayload(AData: PByte; ASize: Integer;
+  out ABytes: TBytes): Integer;
+/// <summary>
 ///   Exposed for the test project only: the runtime's own symbol-text reader
 ///   for a module (embedded section, then resource, then the .map file beside
 ///   it), so a test can prove which source a resolution would come from.
 /// </summary>
 function EWTestModuleText(AModule: THandle): string;
+/// <summary>
+///   Exposed for the test project only: where the symbol text of a module comes
+///   from ('embedded', 'map_file' or 'none'), read straight from the module.
+/// </summary>
+function EWTestModuleSource(AModule: THandle): string;
+/// <summary>
+///   Exposed for the test project only: the symbol source of the HOST module as
+///   the runtime reports it on events.
+/// </summary>
+function EWTestHostSymbolSource: string;
+/// <summary>
+///   Exposed for the test project only: builds a symbol table from map text and
+///   answers what a trace would print for an offset of that module (the name,
+///   with the line when the map has one).
+/// </summary>
+function EWTestDescribeFromMapText(const AMapText: string; AOffset: NativeUInt): string;
+/// <summary>
+///   Exposed for the test project only: whether a module image is linked for
+///   the console subsystem (read from its PE header).
+/// </summary>
+function EWTestIsConsoleSubsystem(AModule: THandle): Boolean;
 {$IFDEF CPUX86}
 /// <summary>
 ///   Exposed for the test project only: the CALL-instruction size detector
@@ -933,12 +1028,14 @@ uses
   Winapi.Windows,
   Winapi.WinSock,
   System.Win.Registry,
+  System.ZLib,
 {$ENDIF}
 {$IFDEF LINUX}
   Posix.Base,
   Posix.Fcntl,
   Posix.Unistd,
   Posix.Pwd,
+  Posix.SysStatvfs,
 {$ENDIF}
 {$IFDEF ANDROID}
   Posix.Unistd,
@@ -950,7 +1047,9 @@ uses
   Androidapi.JNI.GraphicsContentViewText,
   Androidapi.JNIBridge,
 {$ENDIF}
+  System.Character,
   System.StrUtils,
+  System.Types,
   System.TimeSpan,
   System.NetConsts;
 
@@ -969,6 +1068,20 @@ begin
   Result := TThread.Current.ThreadID;
   {$ENDIF}
 end;
+
+// XE8 has no TJSONBool (TJSONTrue / TJSONFalse only)
+function EWJsonBool(AValue: Boolean): TJSONValue;
+begin
+  if AValue then
+    Result := TJSONTrue.Create
+  else
+    Result := TJSONFalse.Create;
+end;
+
+{$IFDEF MSWINDOWS}
+// Not declared by XE8's Winapi.Windows; present on Vista and later
+function EWGetTickCount64: UInt64; stdcall; external 'kernel32.dll' name 'GetTickCount64';
+{$ENDIF}
 
 {$IFDEF MSWINDOWS}
 // Types for GetLogicalProcessorInformation (may not be in older Delphi)
@@ -1235,6 +1348,29 @@ end;
 // Automatic Exception Capture
 // ============================================================
 
+{$IFDEF MSWINDOWS}
+// True when the image is linked for the console subsystem. Read from the PE
+// header of the image itself: the CONSOLE define says how THIS unit was
+// compiled, and a C++Builder console program compiles the SDK unit as GUI.
+function STIsConsoleSubsystem(AModule: THandle): Boolean;
+var
+  DosHeader: PImageDosHeader;
+  Nt: PImageNtHeaders32;
+begin
+  Result := False;
+  if AModule = 0 then
+    Exit;
+  DosHeader := PImageDosHeader(AModule);
+  if DosHeader^.e_magic <> IMAGE_DOS_SIGNATURE then
+    Exit;
+  Nt := PImageNtHeaders32(NativeUInt(AModule) + NativeUInt(DosHeader^._lfanew));
+  if Nt^.Signature <> IMAGE_NT_SIGNATURE then
+    Exit;
+  // Same offset in the 32-bit and the 64-bit optional header.
+  Result := Nt^.OptionalHeader.Subsystem = IMAGE_SUBSYSTEM_WINDOWS_CUI;
+end;
+{$ENDIF}
+
 function ExeWatchIsGUIApplication: Boolean;
 {$IF DEFINED(MSWINDOWS) AND NOT DEFINED(CONSOLE)}
 var
@@ -1248,6 +1384,9 @@ begin
   Result := False;
   {$ELSE}
   {$IFDEF MSWINDOWS}
+  // Compiled as GUI, but the program that hosts it may still be a console one.
+  if STIsConsoleSubsystem(GetModuleHandle(nil)) then
+    Exit(False);
   // Non-console Windows app: could be a VCL/FMX GUI or a TService/daemon.
   // Services run on non-interactive window stations (e.g. "Service-0x0-3e7$")
   // which lack the WSF_VISIBLE flag — use this to tell them apart from GUI apps.
@@ -1609,7 +1748,7 @@ begin
   if DriveType <> '' then
     Result.AddPair('drive_type', DriveType);
   if IsSSD >= 0 then
-    Result.AddPair('is_ssd', TJSONBool.Create(IsSSD = 1));
+    Result.AddPair('is_ssd', EWJsonBool(IsSSD = 1));
 end;
 
 { TMonitorInfo }
@@ -1624,7 +1763,7 @@ begin
   Result.AddPair('height', TJSONNumber.Create(Height));
   if BitsPerPixel > 0 then
     Result.AddPair('bits_per_pixel', TJSONNumber.Create(BitsPerPixel));
-  Result.AddPair('primary', TJSONBool.Create(Primary));
+  Result.AddPair('primary', EWJsonBool(Primary));
 end;
 
 {$IFDEF MSWINDOWS}
@@ -1810,6 +1949,111 @@ begin
 end;
 {$ENDIF}
 
+// The first "model name" of /proc/cpuinfo. The ARM layout has none: empty, and nothing is guessed.
+function EWParseCpuModelName(const AText: string): string;
+var
+  Line: string;
+  Colon: Integer;
+begin
+  Result := '';
+  for Line in AText.Split([#10]) do
+    if Line.StartsWith('model name') then
+    begin
+      Colon := Pos(':', Line);
+      if Colon > 0 then
+        Result := Trim(Copy(Line, Colon + 1, MaxInt));
+      Exit;
+    end;
+end;
+
+// Mounts that are the kernel talking to itself, not a disk: the same list as the Python and .NET SDKs.
+function EWIsPseudoFileSystem(const AFileSystem: string): Boolean;
+begin
+  Result := MatchStr(AFileSystem, ['proc', 'sysfs', 'devtmpfs', 'tmpfs', 'devpts', 'cgroup', 'cgroup2',
+    'pstore', 'securityfs', 'debugfs', 'hugetlbfs', 'mqueue', 'fusectl', 'binfmt_misc', 'autofs', 'tracefs',
+    'configfs', 'efivarfs', 'bpf', 'nsfs', 'fuse.snapfuse']);
+end;
+
+// Shares: the size of one that no longer answers is a call that does not return.
+function EWIsNetworkFileSystem(const AFileSystem: string): Boolean;
+begin
+  Result := MatchStr(AFileSystem, ['nfs', 'nfs4', 'cifs', 'smbfs', 'smb3', 'fuse.sshfs', '9p', 'ceph', 'glusterfs', 'afs']);
+end;
+
+// /proc/mounts writes a space, a tab, a newline and a backslash as a backslash and three octal digits.
+function EWUnescapeMount(const AText: string): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  I := 1;
+  while I <= Length(AText) do
+  begin
+    if (AText[I] = '\') and (I + 3 <= Length(AText)) and CharInSet(AText[I + 1], ['0'..'3']) and
+       CharInSet(AText[I + 2], ['0'..'7']) and CharInSet(AText[I + 3], ['0'..'7']) then
+    begin
+      Result := Result + Char((Ord(AText[I + 1]) - 48) * 64 + (Ord(AText[I + 2]) - 48) * 8 + (Ord(AText[I + 3]) - 48));
+      Inc(I, 4);
+    end
+    else
+    begin
+      Result := Result + AText[I];
+      Inc(I);
+    end;
+  end;
+end;
+
+// One line of /proc/mounts: device, mount point, file system, options and two numbers.
+function EWParseMountLine(const ALine: string; out ADevice, AMountPoint, AFileSystem: string): Boolean;
+var
+  Fields: TArray<string>;
+begin
+  ADevice := '';
+  AMountPoint := '';
+  AFileSystem := '';
+  Fields := ALine.Split([' ']);
+  Result := (Length(Fields) >= 3) and (Fields[1] <> '') and (Fields[2] <> '');
+  if Result then
+  begin
+    ADevice := EWUnescapeMount(Fields[0]);
+    AMountPoint := EWUnescapeMount(Fields[1]);
+    AFileSystem := Fields[2];
+  end;
+end;
+
+// The disk behind a device ("sda1" -> "sda", "nvme0n1p2" -> "nvme0n1"), to ask the kernel whether it spins.
+// Empty when it is not known. Virtual disks (vda, xvda) are not guessed at: their flag is whatever the
+// hypervisor says, and "it spins" said about an SSD sends the diagnosis the wrong way.
+function EWBlockDeviceName(const ADevice: string): string;
+var
+  Name: string;
+  I: Integer;
+begin
+  Result := '';
+  if not ADevice.StartsWith('/dev/') then
+    Exit;
+  Name := Copy(ADevice, 6, MaxInt);
+  if (Name = '') or (Pos('/', Name) > 0) then
+    Exit;
+  if Name.StartsWith('nvme') or Name.StartsWith('mmcblk') then
+  begin
+    // The partition is a "p" and digits at the end, after a digit.
+    I := Length(Name);
+    while (I > 0) and CharInSet(Name[I], ['0'..'9']) do
+      Dec(I);
+    if (I > 1) and (I < Length(Name)) and (Name[I] = 'p') and CharInSet(Name[I - 1], ['0'..'9']) then
+      Name := Copy(Name, 1, I - 1);
+    Result := Name;
+  end
+  else if Name.StartsWith('sd') or Name.StartsWith('hd') then
+  begin
+    while (Name <> '') and CharInSet(Name[Length(Name)], ['0'..'9']) do
+      SetLength(Name, Length(Name) - 1);
+    if Length(Name) > 2 then
+      Result := Name;
+  end;
+end;
+
 {$IFDEF LINUX}
 // ---------------------------------------------------------------------------
 // The same "why is this machine slow?" facts, where Linux has an answer.
@@ -1848,6 +2092,110 @@ begin
     Result := TryStrToInt64(Trim(string(AnsiString(PAnsiChar(@Buffer[0])))), AValue);
   finally
     __close(Handle);
+  end;
+end;
+
+// A whole /proc or /sys text file, by POSIX I/O for the same reason as above: the size it reports is zero.
+function EWReadSysText(const APath: string; AMaxBytes: Integer; out AText: string): Boolean;
+var
+  Handle: Integer;
+  Bytes: TBytes;
+  Total: Integer;
+  Count: NativeInt;
+begin
+  Result := False;
+  AText := '';
+  Handle := open(PAnsiChar(AnsiString(APath)), O_RDONLY);
+  if Handle < 0 then
+    Exit;
+  try
+    SetLength(Bytes, AMaxBytes);
+    Total := 0;
+    while Total < AMaxBytes do
+    begin
+      Count := __read(Handle, @Bytes[Total], AMaxBytes - Total);
+      if Count <= 0 then
+        Break;
+      Inc(Total, Integer(Count));
+    end;
+    SetLength(Bytes, Total);
+    AText := TEncoding.UTF8.GetString(Bytes);
+    Result := Total > 0;
+  finally
+    __close(Handle);
+  end;
+end;
+
+function EWLinuxGetCpuName: string;
+var
+  Text: string;
+begin
+  Result := '';
+  // The name is in the first block of the file: no need to read every core.
+  if EWReadSysText('/proc/cpuinfo', 65536, Text) then
+    Result := EWParseCpuModelName(Text);
+end;
+
+// The disks, as the Python and .NET SDKs list them: the real mounts of /proc/mounts, with the size from statvfs.
+function EWLinuxGetDisks: TArray<TDiskInfo>;
+var
+  Text, Device, MountPoint, FileSystem, BlockName: string;
+  Line: string;
+  Seen: TStringList;
+  List: TList<TDiskInfo>;
+  Stat: _statvfs;
+  Disk: TDiskInfo;
+  Total: Int64;
+  Rotational: Int64;
+begin
+  SetLength(Result, 0);
+  if not EWReadSysText('/proc/mounts', 262144, Text) then
+    Exit;
+  Seen := TStringList.Create;
+  Seen.CaseSensitive := True;  // /mnt/Data and /mnt/data are two mounts
+  List := TList<TDiskInfo>.Create;
+  try
+    for Line in Text.Split([#10]) do
+    begin
+      if not EWParseMountLine(Line, Device, MountPoint, FileSystem) then
+        Continue;
+      if EWIsPseudoFileSystem(FileSystem) or (Seen.IndexOf(MountPoint) >= 0) then
+        Continue;
+      // InitializeExeWatch collects the disks on the caller's thread: a share that no longer answers
+      // must not hold the application at start-up, so a network mount is not asked for its size.
+      if EWIsNetworkFileSystem(FileSystem) then
+        Continue;
+      FillChar(Stat, SizeOf(Stat), 0);
+      if statvfs(PAnsiChar(AnsiString(MountPoint)), Stat) <> 0 then
+        Continue;
+      Total := Int64(Stat.f_blocks) * Int64(Stat.f_frsize);
+      if Total = 0 then
+        Continue;
+      Seen.Add(MountPoint);
+
+      Disk := Default(TDiskInfo);
+      Disk.Drive := MountPoint;
+      Disk.VolumeName := Device;
+      Disk.FileSystem := FileSystem;
+      Disk.TotalBytes := Total;
+      Disk.FreeBytes := Int64(Stat.f_bfree) * Int64(Stat.f_frsize);
+      Disk.DriveType := 'Fixed';
+      Disk.IsSSD := -1;
+      // 0 = solid state, 1 = it spins, in the kernel's own words. Absent when the device is not known.
+      BlockName := EWBlockDeviceName(Device);
+      if (BlockName <> '') and EWReadSysInt('/sys/block/' + BlockName + '/queue/rotational', Rotational) then
+      begin
+        if Rotational = 0 then
+          Disk.IsSSD := 1
+        else if Rotational = 1 then
+          Disk.IsSSD := 0;
+      end;
+      List.Add(Disk);
+    end;
+    Result := List.ToArray;
+  finally
+    List.Free;
+    Seen.Free;
   end;
 end;
 
@@ -2153,7 +2501,7 @@ begin
 
   // System boot time
   try
-    TickCount64Val := GetTickCount64;
+    TickCount64Val := EWGetTickCount64;
     BootTime := Now - (TickCount64Val / (1000 * 60 * 60 * 24));
     Result.SystemBootTime := TTimeZone.Local.ToUniversalTime(BootTime);
   except
@@ -2332,10 +2680,10 @@ begin
     // Ignore errors
   end;
 
-  // CPU name still needs /proc/cpuinfo parsed, see docs/sdk-roadmap.md. The
-  // counts do not: TThread.ProcessorCount goes through sysconf, which is what
-  // the Android branch of this function already relies on.
-  Result.CPUName := '';
+  // The name comes from /proc/cpuinfo (EWLinuxGetCpuName). The counts do not need it:
+  // TThread.ProcessorCount goes through sysconf, which is what the Android branch of
+  // this function already relies on.
+  Result.CPUName := EWLinuxGetCpuName;
   Result.CPUCores := TThread.ProcessorCount;
   Result.CPULogicalProcessors := TThread.ProcessorCount;
 
@@ -2359,13 +2707,16 @@ begin
 
   EWLinuxGetCpuSpeed(Result.CPUMaxMhz, Result.CPUMinCoreMhz, Result.CPUThrottleMaxPct);
   // No battery on a Linux server, and reporting "ac" for every one of them says
-  // nothing. is_ssd would need the disk enumeration this branch does not have.
+  // nothing.
   Result.PowerSource := '';
   Result.RemoteSession := -1;
   {$ENDIF}
 
   SetLength(Result.Disks, 0);
   SetLength(Result.Monitors, 0);
+  {$IFDEF LINUX}
+  Result.Disks := EWLinuxGetDisks;
+  {$ENDIF}
 
   // Paths
   Result.ExecutablePath := ParamStr(0);
@@ -2471,7 +2822,7 @@ begin
   if PowerSource <> '' then
     Result.AddPair('power_source', PowerSource);
   if RemoteSession >= 0 then
-    Result.AddPair('remote_session', TJSONBool.Create(RemoteSession = 1));
+    Result.AddPair('remote_session', EWJsonBool(RemoteSession = 1));
 
   // Disks
   if Length(Disks) > 0 then
@@ -2523,6 +2874,27 @@ begin
     Result.AddPair('app_version_info', AppVersionInfo.ToJSON);
 end;
 
+procedure THardwareInfo.Anonymize(const ARoots: TArray<TEWPathRoot>; ACaseSensitive: Boolean);
+var
+  I: Integer;
+begin
+  ExecutablePath := TExeWatchHelper.ScrubUserPaths(ExecutablePath, ARoots, ACaseSensitive);
+  WorkingDirectory := TExeWatchHelper.ScrubUserPaths(WorkingDirectory, ARoots, ACaseSensitive);
+  CommandLine := TExeWatchHelper.ScrubUserPaths(CommandLine, ARoots, ACaseSensitive);
+  // A private address says where the person is; nothing in the diagnosis needs it.
+  SetLength(LocalIPAddresses, 0);
+  // A volume label is whatever its owner typed: "BOBS DISK".
+  for I := 0 to High(Disks) do
+  begin
+    Disks[I].VolumeName := '';
+    // On Linux a removable disk is mounted under the login's own folder.
+    Disks[I].Drive := TExeWatchHelper.ScrubUserPaths(Disks[I].Drive, ARoots, ACaseSensitive);
+    // What follows the media folder is the disk's label ("/media/bob/BOBS DISK"): it goes too.
+    if Disks[I].Drive.StartsWith('[MEDIA]') then
+      Disks[I].Drive := '[MEDIA]';
+  end;
+end;
+
 { TExeWatchConfig }
 
 class function TExeWatchConfig.Create(const AApiKey, ACustomerId: string): TExeWatchConfig;
@@ -2539,7 +2911,7 @@ begin
   Result.AppVersion := '';        // User-defined version, empty by default
   Result.GaugeSamplingIntervalSec := EXEWATCH_DEFAULT_GAUGE_SAMPLING_INTERVAL_SEC;
   Result.MaxPendingAgeDays := EXEWATCH_DEFAULT_MAX_PENDING_AGE_DAYS;
-  Result.AnonymizeDeviceId := False;
+  Result.AnonymizeDeviceId := True;
 end;
 
 { TExeWatchHelper }
@@ -2661,6 +3033,167 @@ begin
   end;
   {$IFDEF EW_RESTORE_Q}{$Q+}{$UNDEF EW_RESTORE_Q}{$ENDIF}
   Result := IntToHex(Hash, 8).ToLower;
+end;
+
+class function TExeWatchHelper.GetUserPathRoots: TArray<TEWPathRoot>;
+var
+  List: TList<TEWPathRoot>;
+  {$IFNDEF MSWINDOWS}
+  Login: string;
+  Root: TEWPathRoot;
+  {$ENDIF}
+
+  procedure Add(const AToken, AEnvName: string);
+  var
+    Root: TEWPathRoot;
+  begin
+    Root.Value := GetEnvironmentVariable(AEnvName);
+    if Root.Value = '' then
+      Exit;
+    Root.Token := AToken;
+    List.Add(Root);
+  end;
+
+begin
+  List := TList<TEWPathRoot>.Create;
+  try
+    {$IFDEF MSWINDOWS}
+    Add('[USERPROFILE]', 'USERPROFILE');
+    Add('[APPDATA]', 'APPDATA');
+    Add('[LOCALAPPDATA]', 'LOCALAPPDATA');
+    Add('[TEMP]', 'TEMP');
+    Add('[TEMP]', 'TMP');
+    {$ELSE}
+    Add('[HOME]', 'HOME');
+    // A removable disk is mounted under the login's own folder: /media/<login>, /run/media/<login>.
+    Login := GetUsername;
+    if (Login <> '') and (Login <> 'unknown') then
+    begin
+      Root.Token := '[MEDIA]';
+      Root.Value := '/media/' + Login;
+      List.Add(Root);
+      Root.Value := '/run/media/' + Login;
+      List.Add(Root);
+    end;
+    {$ENDIF}
+    Result := List.ToArray;
+  finally
+    List.Free;
+  end;
+end;
+
+// A character that can be part of a file or folder name. '/' and '\' are not: they end a name.
+function EWIsNameChar(C: Char): Boolean;
+begin
+  Result := C.IsLetterOrDigit or (C = '_') or (C = '.') or (C = '-') or (C = '~');
+end;
+
+// Both separators are the same one for the comparison, and a root does not end with one.
+function EWNormalizeRoot(const AValue: string; ACaseSensitive: Boolean): string;
+begin
+  Result := StringReplace(AValue, '/', '\', [rfReplaceAll]);
+  while (Result <> '') and (Result[Length(Result)] = '\') do
+    SetLength(Result, Length(Result) - 1);
+  // AnsiLowerCase, not LowerCase: the latter folds only ASCII, and a profile folder is often 'Müller'.
+  if not ACaseSensitive then
+    Result := AnsiLowerCase(Result);
+end;
+
+class function TExeWatchHelper.ScrubUserPaths(const AText: string; const ARoots: TArray<TEWPathRoot>;
+  ACaseSensitive: Boolean): string;
+const
+  // A shorter value is a drive ("C:\"), the filesystem root or noise: replacing it would damage
+  // the text instead of hiding a person.
+  MIN_ROOT_LENGTH = 4;
+var
+  Values, Tokens: TArray<string>;
+  Norm: string;
+  Builder: TStringBuilder;
+  I, J, K, Count, Len: Integer;
+  Matched: Boolean;
+  TmpValue, TmpToken: string;
+begin
+  Result := AText;
+  if (AText = '') or (Length(ARoots) = 0) then
+    Exit;
+
+  // Keep the usable roots, without repeated values.
+  SetLength(Values, Length(ARoots));
+  SetLength(Tokens, Length(ARoots));
+  Count := 0;
+  for I := 0 to High(ARoots) do
+  begin
+    TmpValue := EWNormalizeRoot(ARoots[I].Value, ACaseSensitive);
+    if (Length(TmpValue) < MIN_ROOT_LENGTH) or (ARoots[I].Token = '') then
+      Continue;
+    Matched := False;
+    for J := 0 to Count - 1 do
+      if Values[J] = TmpValue then
+      begin
+        Matched := True;
+        Break;
+      end;
+    if Matched then
+      Continue;
+    Values[Count] := TmpValue;
+    Tokens[Count] := ARoots[I].Token;
+    Inc(Count);
+  end;
+  if Count = 0 then
+    Exit;
+
+  // Longest first, so that '...\AppData\Local' wins over '...\bob'.
+  for I := 1 to Count - 1 do
+    for J := I downto 1 do
+    begin
+      if Length(Values[J]) <= Length(Values[J - 1]) then
+        Break;
+      TmpValue := Values[J]; Values[J] := Values[J - 1]; Values[J - 1] := TmpValue;
+      TmpToken := Tokens[J]; Tokens[J] := Tokens[J - 1]; Tokens[J - 1] := TmpToken;
+    end;
+
+  // The comparison runs on a copy with the same length as the text, so that an index in one is
+  // an index in the other.
+  Norm := StringReplace(AText, '/', '\', [rfReplaceAll]);
+  if not ACaseSensitive then
+  begin
+    TmpValue := AnsiLowerCase(Norm);
+    if Length(TmpValue) = Length(Norm) then
+      Norm := TmpValue;
+  end;
+
+  Builder := TStringBuilder.Create;
+  try
+    I := 1;
+    Len := Length(AText);
+    while I <= Len do
+    begin
+      Matched := False;
+      // A name does not start in the middle of another: 'xC:\Users\bob', '/mnt/home/bob'.
+      if (I = 1) or not EWIsNameChar(Norm[I - 1]) then
+        for K := 0 to Count - 1 do
+        begin
+          J := Length(Values[K]);
+          if (I + J - 1 <= Len) and (Norm[I] = Values[K][1]) and (Copy(Norm, I, J) = Values[K]) and
+             // ... and it does not end in the middle of one: 'bobby', 'bob.old', 'bob~1'.
+             ((I + J > Len) or not EWIsNameChar(Norm[I + J])) then
+          begin
+            Builder.Append(Tokens[K]);
+            Inc(I, J);
+            Matched := True;
+            Break;
+          end;
+        end;
+      if not Matched then
+      begin
+        Builder.Append(AText[I]);
+        Inc(I);
+      end;
+    end;
+    Result := Builder.ToString;
+  finally
+    Builder.Free;
+  end;
 end;
 
 class function TExeWatchHelper.GetDefaultStoragePath(const AApiKey: string = ''): string;
@@ -2886,12 +3419,13 @@ end;
 
 constructor TExeWatch.Create(const AConfig: TExeWatchConfig);
 var
-  SendingFiles: TArray<string>;
+  SendingFiles: TStringDynArray;
   SendingFile: string;
   OriginalName: string;
   StartupData: TJSONObject;
   StartupMsg: string;
   Pair: TPair<string, string>;
+  HasOwnDeviceId: Boolean;
 begin
   inherited Create;
   FConfig := AConfig;
@@ -2919,13 +3453,17 @@ begin
   // the Devices page, or any other field that displays the username.
   if FConfig.AnonymizeDeviceId then
   begin
+    // An application that set its own DeviceId keeps it: only the names are hashed.
+    HasOwnDeviceId := (FConfig.DeviceInfo.DeviceId <> '') and
+      (FConfig.DeviceInfo.DeviceId <> TExeWatchHelper.GetDeviceId);
     FConfig.DeviceInfo.Username := TExeWatchHelper.AnonymizeUsername(FConfig.DeviceInfo.Username);
     // The hostname can embed the username (e.g. host "DANIELETETIPC" contains
-    // login "daniele"), which would leak the real login through DeviceId even
-    // after the username is hashed. Hash the hostname portion too so DeviceId
-    // carries no PII while remaining stable per machine (hash@hash).
-    FConfig.DeviceInfo.DeviceId := FConfig.DeviceInfo.Username + '@' +
-      TExeWatchHelper.AnonymizeUsername(FConfig.DeviceInfo.Hostname);
+    // login "daniele"). It is hashed too, and the Hostname field of the payload
+    // carries that same hash: the real name never leaves the machine, and
+    // DeviceId stays stable per machine (hash@hash).
+    FConfig.DeviceInfo.Hostname := TExeWatchHelper.AnonymizeUsername(FConfig.DeviceInfo.Hostname);
+    if not HasOwnDeviceId then
+      FConfig.DeviceInfo.DeviceId := FConfig.DeviceInfo.Username + '@' + FConfig.DeviceInfo.Hostname;
   end;
   FBuffer := TList<TLogEvent>.Create;
   FBufferLock := TCriticalSection.Create;
@@ -2956,7 +3494,7 @@ begin
   FPersistEvent := TEvent.Create(nil, False, False, '');
   FEnabled := True;
   {$IFDEF MSWINDOWS}
-  FFileCounter := GetTickCount64;
+  FFileCounter := EWGetTickCount64;
   {$ELSE}
   FFileCounter := TThread.GetTickCount;
   {$ENDIF}
@@ -3064,6 +3602,15 @@ var
   ThreadStackPair: TPair<TThreadID, TList<string>>;
   Pair: TPair<TThreadID, TList<TBreadcrumb>>;
 begin
+  // A constructor that raised (a malformed API key is refused before anything
+  // is allocated) still runs this destructor, with every field nil: there is
+  // nothing to shut down or free, and touching it would replace the real
+  // exception with an access violation.
+  if FBuffer = nil then
+  begin
+    inherited Destroy;
+    Exit;
+  end;
   Shutdown;
 
   // Free TJSONObject instances inside buffer records
@@ -3152,7 +3699,7 @@ end;
 
 procedure TExeWatch.PurgeExpiredFiles;
 var
-  AllFiles: TArray<string>;
+  AllFiles: TStringDynArray;
   FilePath: string;
   FileAge: TDateTime;
   DaysOld: Double;
@@ -3604,7 +4151,7 @@ end;
 
 function TExeWatch.GetPendingLogFiles: TArray<string>;
 var
-  LogFiles, DeviceFiles, MetricFiles: TArray<string>;
+  LogFiles, DeviceFiles, MetricFiles: TStringDynArray;
   I, Idx: Integer;
 begin
   EnsureStoragePath;
@@ -3788,6 +4335,7 @@ var
   SendingPath: string;
   I: Integer;
   IsDeviceInfoFile: Boolean;
+  IsCustomInfoFile: Boolean;  // a device file made by SendCustomDeviceInfo: no hardware_info in it
   IsMetricFile: Boolean;
   Endpoint: string;
   OriginalExt: string;
@@ -3863,6 +4411,10 @@ begin
         TFile.Delete(SendingPath);
         Exit;
       end;
+
+      // SendCustomDeviceInfo writes a device file without hardware_info; the
+      // regular device info always has it
+      IsCustomInfoFile := IsDeviceInfoFile and (FileJSON.GetValue('hardware_info') = nil);
 
       // Build payload for API
       Payload := TJSONObject.Create;
@@ -3953,8 +4505,10 @@ begin
       // Send current config version for dynamic configuration
       if FServerConfigVersion > 0 then
         HttpClient.CustomHeaders['X-Config-Version'] := IntToStr(FServerConfigVersion);
+      {$IF CompilerVersion >= 33}
       HttpClient.ConnectionTimeout := 10000;
       HttpClient.ResponseTimeout := 30000;
+      {$IFEND}
 
       RequestContent := TStringStream.Create(Payload.ToJSON, TEncoding.UTF8);
 
@@ -3994,13 +4548,15 @@ begin
           if ResponseJson <> nil then
           begin
             // Check for dynamic configuration update from server
-            lJValue := ResponseJson.FindValue('config');
+            lJValue := ResponseJson.GetValue('config');
             if Assigned(lJValue) and (not lJValue.Null) then
             begin
               ApplyServerConfig(lJValue as TJSONObject);
             end;
 
-            if IsDeviceInfoFile then
+            if IsCustomInfoFile then
+              DoCustomDeviceInfoSent(True, '')
+            else if IsDeviceInfoFile then
             begin
               DoDeviceInfoSent(True, '')
             end
@@ -4039,6 +4595,9 @@ begin
           WriteInternalLog(Format('WARNING | HTTP 422 on device-info, deleting | File: %s | Response: %s',
             [ExtractFileName(AFilePath), Response.ContentAsString]));
           TFile.Delete(SendingPath);
+          // final refusal: the caller is told (a retry would get the same answer)
+          if IsCustomInfoFile then
+            DoCustomDeviceInfoSent(False, 'HTTP 422: ' + Copy(Response.ContentAsString, 1, 200));
         end
         else
         begin
@@ -4072,6 +4631,8 @@ begin
         WriteInternalLog(Format('WARNING | HTTP 429 - Plan limit exceeded, data dropped | File: %s | Response: %s',
           [ExtractFileName(AFilePath), Copy(Response.ContentAsString, 1, 200)]));
         TFile.Delete(SendingPath);
+        if IsCustomInfoFile then
+          DoCustomDeviceInfoSent(False, 'HTTP 429: ' + Copy(Response.ContentAsString, 1, 200));
         // Don't set NetworkError - continue to next file
       end
       else
@@ -4245,6 +4806,15 @@ begin
     FOnDeviceInfoSent(ASuccess, AErrorMessage);
 end;
 
+procedure TExeWatch.DoCustomDeviceInfoSent(ASuccess: Boolean; const AErrorMessage: string);
+begin
+  // Called from the shipper thread, once per SendCustomDeviceInfo file: True when the
+  // server took it, False when it refused it for good (422, 429). A failure that will
+  // be retried (network, 5xx) is reported by OnError only.
+  if Assigned(FOnCustomDeviceInfoSent) then
+    FOnCustomDeviceInfoSent(ASuccess, AErrorMessage);
+end;
+
 procedure TExeWatch.SetCustomDeviceInfo(const AKey, AValue: string);
 begin
   FCustomDeviceInfoLock.Enter;
@@ -4336,34 +4906,25 @@ begin
   QueueDeviceInfo;
 end;
 
-procedure TExeWatch.QueueDeviceInfo;
+function TExeWatch.BuildDeviceInfoFile: TJSONObject;
 var
-  FileContent: TJSONObject;
   HardwareInfo: THardwareInfo;
   CustomInfoJSON: TJSONObject;
   Pair: TPair<string, string>;
-  FileName: string;
   MergedInfo: TDictionary<string, string>;
 begin
-  // Skip if customer_id is not set yet (will be sent when SetCustomerId is called)
-  if FConfig.CustomerId = '' then
-    Exit;
-
-  // Skip if already sent
-  if FDeviceInfoSent then
-    Exit;
-
-  EnsureStoragePath;
-
   // Collect hardware info
   HardwareInfo := THardwareInfo.Collect;
+  if FConfig.AnonymizeDeviceId then
+    HardwareInfo.Anonymize(TExeWatchHelper.GetUserPathRoots,
+      {$IFDEF MSWINDOWS}False{$ELSE}True{$ENDIF});
 
-  FileContent := TJSONObject.Create;
+  Result := TJSONObject.Create;
   try
     // Build the file content
-    FileContent.AddPair('customer_id', FConfig.CustomerId);
-    FileContent.AddPair('device', FConfig.DeviceInfo.ToJSON);
-    FileContent.AddPair('hardware_info', HardwareInfo.ToJSON);
+    Result.AddPair('customer_id', FConfig.CustomerId);
+    Result.AddPair('device', FConfig.DeviceInfo.ToJSON);
+    Result.AddPair('hardware_info', HardwareInfo.ToJSON);
 
     // Include custom device info (merge InitialCustomDeviceInfo + runtime FCustomDeviceInfo)
     // Always include this field, even if empty, to indicate current state to backend
@@ -4387,11 +4948,33 @@ begin
       CustomInfoJSON := TJSONObject.Create;
       for Pair in MergedInfo do
         CustomInfoJSON.AddPair(Pair.Key, Pair.Value);
-      FileContent.AddPair('custom_device_info', CustomInfoJSON);
+      Result.AddPair('custom_device_info', CustomInfoJSON);
     finally
       MergedInfo.Free;
     end;
+  except
+    Result.Free;
+    raise;
+  end;
+end;
 
+procedure TExeWatch.QueueDeviceInfo;
+var
+  FileContent: TJSONObject;
+  FileName: string;
+begin
+  // Skip if customer_id is not set yet (will be sent when SetCustomerId is called)
+  if FConfig.CustomerId = '' then
+    Exit;
+
+  // Skip if already sent
+  if FDeviceInfoSent then
+    Exit;
+
+  EnsureStoragePath;
+
+  FileContent := BuildDeviceInfoFile;
+  try
     // Write to file with .ewdevice extension
     FileName := TPath.Combine(FConfig.StoragePath, FormatDateTime('yyyymmddhhnnsszzz', Now) +
       '_' + IntToStr(TThread.Current.ThreadID) + '_' + IntToStr(AtomicIncrement(FFileCounter)) +
@@ -4471,7 +5054,7 @@ begin
   begin
     if AExtraData = nil then
       AExtraData := TJSONObject.Create;
-    if AExtraData.FindValue('stack_trace') = nil then
+    if AExtraData.GetValue('stack_trace') = nil then
     begin
       StackTrace := GetStackTraceStr(3);
       if StackTrace <> '' then
@@ -4479,6 +5062,7 @@ begin
       else
         AExtraData.AddPair('no_stacktrace_reason', TJSONNumber.Create(GetNoStackTraceReason));
     end;
+    AttachSymbolSource(AExtraData);
   end;
 
   // Build extra data with user, tags, release, and optionally breadcrumbs
@@ -4514,7 +5098,7 @@ begin
     if IsErrorLevel and not ShouldPersist and (FConfig.CustomerId <> '') then
     begin
       {$IFDEF MSWINDOWS}
-      NowTick := GetTickCount64;
+      NowTick := EWGetTickCount64;
       {$ELSE}
       NowTick := TThread.GetTickCount;
       {$ENDIF}
@@ -4604,15 +5188,34 @@ var
 {$ENDIF}
 begin
   ExtraData := TJSONObject.Create;
-  ExtraData.AddPair('exception_class', E.ClassName);
-  ExtraData.AddPair('exception_message', E.Message);
+  if E <> nil then
+  begin
+    ExtraData.AddPair('exception_class', E.ClassName);
+    ExtraData.AddPair('exception_message', E.Message);
+  end;
   {$IFDEF MSWINDOWS}
-  // Capture stack trace — skip ErrorWithException itself
-  StackTrace := GetStackTraceStr(1);
+  // The trace taken where the exception was raised, when it has one: from a
+  // handler that caught it far from the raise, the current stack is only the
+  // handler's own chain. The current stack (skipping this method) is the
+  // fallback: an exception raised before the hook was installed, one never
+  // raised, and no exception at all (nil), where it is the only trace there is.
+  StackTrace := GetLastExceptionStackTrace(E);
+  if StackTrace = '' then
+    StackTrace := GetStackTraceStr(1);
   ExtraData.AddPair('stack_trace', StackTrace);
   {$ENDIF}
 
-  if AAdditionalMessage <> '' then
+  // A framework's exception handler can be called without an exception (a
+  // route that does not exist, for one): logging must never raise, so the
+  // call is reported as what it is.
+  if E = nil then
+  begin
+    if Trim(AAdditionalMessage) <> '' then
+      Msg := AAdditionalMessage
+    else
+      Msg := 'ErrorWithException called without an exception';
+  end
+  else if AAdditionalMessage <> '' then
     Msg := AAdditionalMessage + ': ' + E.Message
   else
     Msg := E.Message;
@@ -5026,8 +5629,8 @@ begin
     AutoCloseDurationMs := (TStopwatch.GetTimeStamp - DuplicateEntry.StartTicks)
       / TStopwatch.Frequency * 1000;
     AutoCloseExtraData.AddPair('duration_ms', TJSONNumber.Create(AutoCloseDurationMs));
-    AutoCloseExtraData.AddPair('success', TJSONBool.Create(False));
-    AutoCloseExtraData.AddPair('auto_closed', TJSONBool.Create(True));
+    AutoCloseExtraData.AddPair('success', EWJsonBool(False));
+    AutoCloseExtraData.AddPair('auto_closed', EWJsonBool(True));
     AutoCloseExtraData.AddPair('auto_close_reason', 'duplicate_start');
     if DuplicateEntry.Metadata <> nil then
     begin
@@ -5047,8 +5650,8 @@ begin
     AutoCloseDurationMs := (TStopwatch.GetTimeStamp - EvictedValues[I].StartTicks)
       / TStopwatch.Frequency * 1000;
     AutoCloseExtraData.AddPair('duration_ms', TJSONNumber.Create(AutoCloseDurationMs));
-    AutoCloseExtraData.AddPair('success', TJSONBool.Create(False));
-    AutoCloseExtraData.AddPair('auto_closed', TJSONBool.Create(True));
+    AutoCloseExtraData.AddPair('success', EWJsonBool(False));
+    AutoCloseExtraData.AddPair('auto_closed', EWJsonBool(True));
     AutoCloseExtraData.AddPair('auto_close_reason', 'max_pending_reached');
     if EvictedValues[I].Metadata <> nil then
     begin
@@ -5132,7 +5735,7 @@ begin
   ExtraData.AddPair('timing_type', 'duration');
   ExtraData.AddPair('timing_id', AId);
   ExtraData.AddPair('duration_ms', TJSONNumber.Create(DurationMs));
-  ExtraData.AddPair('success', TJSONBool.Create(ASuccess));
+  ExtraData.AddPair('success', EWJsonBool(ASuccess));
 
   // Nested timing traces: emit the tree relationship when this span belongs to a
   // trace. parent_span_id '' marks the root (the backend maps it to NULL).
@@ -5861,14 +6464,46 @@ const
   // build-time injectors (deterministic PE surgery, works for any section
   // layout), then the RCDATA resource some tooling still produces.
   EW_MAP_SECTION_NAME = '.ewmap';
-  // 16 stored bytes ('EXEWATCHMAPSIG1' is 15 characters, then one zero).
-  EW_MAP_SECTION_SIG: array[0..15] of AnsiChar = 'EXEWATCHMAPSIG1' + #0;
+  // The section payload is a 32-byte header (TEWMapHeader), then the stored
+  // map. The 14 magic bytes never change, so a reader can always tell "an
+  // ExeWatch map" from "something else"; the rest says HOW the map was stored,
+  // and a reader that does not know that says so instead of reporting an
+  // absent map.
+  EW_MAP_MAGIC: array[0..13] of AnsiChar = 'EXEWATCHMAPSIG';
+  EW_MAP_FORMAT_VERSION = 1;
+  EW_MAP_CODEC_RAW = 0;
+  EW_MAP_CODEC_ZLIB = 1;
+  // A map larger than this is not a map: refused before anything is allocated.
+  EW_MAP_MAX_RAW = 256 * 1024 * 1024;
+  // symbol_source values for a section that is there but cannot be used.
+  EW_SRC_UNSUPPORTED = 'unsupported_map_format';
+  EW_SRC_CORRUPT = 'corrupt_map';
   EW_MAP_RESOURCE_NAME = 'EXEWATCH_MAP';
   // GetModuleHandleEx is not part of Winapi.Windows: local import constants.
   EW_GMHE_UNCHANGED_REFCOUNT = $2;
   EW_GMHE_FROM_ADDRESS = $4;
 
 type
+  // The head of the .ewmap payload, little endian, 32 bytes. HeaderSize lets a
+  // later version add fields at the tail that this reader skips; FormatVersion
+  // changes only when the meaning of the existing fields does. Mirrors
+  // TMapHeader in Core\EWMapInjectU.pas.
+  TEWMapHeader = packed record
+    Magic: array[0..13] of AnsiChar;
+    FormatVersion: Word;
+    HeaderSize: Word;     // bytes from the start of the payload to the stored map
+    Codec: Byte;          // EW_MAP_CODEC_*
+    Flags: Byte;          // reserved, 0
+    RawSize: Cardinal;    // the map text, before compression
+    StoredSize: Cardinal; // bytes right after the header
+    Crc32: Cardinal;      // of the map text, before compression
+  end;
+  PEWMapHeader = ^TEWMapHeader;
+
+  // What the section reader found: a map, no section, or a section this
+  // reader cannot use - and which of the two reasons.
+  TSTMapStatus = (msOk, msAbsent, msUnsupported, msCorrupt);
+
   TSTSymbol = record
     Address: NativeUInt;
     Name: string;
@@ -5897,6 +6532,8 @@ type
     Module: THandle;
     Base: NativeUInt;
     SizeOfImage: Cardinal;
+    // Where the symbol text came from: 'embedded', 'map_file' or 'none'.
+    Source: string;
     ProgramName: string;
     SegOffsets: TArray<NativeUInt>;
     SegCount: Integer;
@@ -5908,8 +6545,11 @@ type
     procedure AddSymbol(AAddress: NativeUInt; const AName: string);
     procedure AddLine(AAddress: NativeUInt; ALine: Integer; const AUnitName: string);
     procedure ShrinkAndSort;
-    function FindSymbol(AAddress: NativeUInt): string;
-    procedure FindLine(AAddress: NativeUInt; out ALine: Integer; out AUnit: string);
+    // The same, and where the symbol starts (module-relative).
+    function FindSymbolAt(AAddress: NativeUInt; out AStart: NativeUInt): string;
+    // ALineStart: where the line entry found starts (module-relative).
+    procedure FindLine(AAddress: NativeUInt; out ALine: Integer; out AUnit: string;
+      out ALineStart: NativeUInt);
   end;
 
 type
@@ -6040,12 +6680,13 @@ begin
       end));
 end;
 
-function TSTModuleSymbols.FindSymbol(AAddress: NativeUInt): string;
+function TSTModuleSymbols.FindSymbolAt(AAddress: NativeUInt; out AStart: NativeUInt): string;
 var
   Lo, Hi, Mid, Found: Integer;
   RelAddr: NativeUInt;
 begin
   Result := '';
+  AStart := 0;
   if (Length(Symbols) = 0) or (AAddress < Base) then Exit;
   RelAddr := AAddress - Base;
   // Bounded by what the map actually covers, not by a flat 16 MB.
@@ -6068,16 +6709,21 @@ begin
       Hi := Mid - 1;
   end;
   if Found >= 0 then
+  begin
     Result := Symbols[Found].Name;
+    AStart := Symbols[Found].Address;
+  end;
 end;
 
-procedure TSTModuleSymbols.FindLine(AAddress: NativeUInt; out ALine: Integer; out AUnit: string);
+procedure TSTModuleSymbols.FindLine(AAddress: NativeUInt; out ALine: Integer; out AUnit: string;
+  out ALineStart: NativeUInt);
 var
   Lo, Hi, Mid, Found: Integer;
   RelAddr: NativeUInt;
 begin
   ALine := 0;
   AUnit := '';
+  ALineStart := 0;
   if (Length(Lines) = 0) or (AAddress < Base) then Exit;
   RelAddr := AAddress - Base;
   if RelAddr > Lines[High(Lines)].Address + ST_ADDR_SLACK then Exit;
@@ -6099,6 +6745,7 @@ begin
   begin
     ALine := Lines[Found].Line;
     AUnit := Lines[Found].UnitName;
+    ALineStart := Lines[Found].Address;
   end;
 end;
 
@@ -6154,9 +6801,14 @@ var
   I, K, P: Integer;
   Line, UnitName, Tok1, Tok2, Tok3, Tok4: string;
   EmptyCount, LineNum: Integer;
-  BaseAddr: NativeUInt;
+  BaseAddr, ImageBase: NativeUInt;
+  VirtualAddr, PreferredBase: UInt64;
   SegNum: Integer;
+  BaseKnown, NameIsFirstToken: Boolean;
 begin
+  ImageBase := 0;
+  PreferredBase := 0;
+  BaseKnown := False;
   SL := TStringList.Create;
   try
     SL.Text := AText;
@@ -6164,6 +6816,15 @@ begin
     while I < SL.Count do
     begin
       Line := Trim(SL[I]);
+
+      // Win64x maps say where the image is meant to load; their symbols carry a
+      // full address (Rva+Base) to measure from it
+      if Pos('Preferred load address is', Line) > 0 then
+      begin
+        PreferredBase := StrToInt64Def('$' + Trim(Copy(Line, Pos('address is', Line) + 10, MaxInt)), 0);
+        Inc(I);
+        Continue;
+      end;
 
       // Main segments - capture offsets for ALL code segments
       if Line.StartsWith('Start') and (Pos('Length', Line) > 0) and (Pos('Name', Line) > 0) then
@@ -6182,10 +6843,30 @@ begin
           begin
             STParseAddr(Tok1, SegNum, BaseAddr);
             if SegNum >= 1 then
+            begin
+              // The image base is the first segment's start rounded down to 1 MB;
+              // every segment's offset is measured from it. shortcut: an image
+              // linked at a base that is not a multiple of 1 MB ({$IMAGEBASE}
+              // custom) is off by the remainder; read the PE header's base
+              // instead if that ever matters. Masking each
+              // segment on its own put a segment that starts 1 MB or more
+              // above the base (the .itext of a large program, where the main
+              // block lives) in the middle of the code.
+              if not BaseKnown then
+              begin
+                ImageBase := BaseAddr and not NativeUInt($FFFFF);
+                BaseKnown := True;
+              end;
               // Every segment gets its offset, not only CODE/ICODE: publics
               // of data segments stored without it landed at tiny addresses
               // and made low addresses resolve to the wrong symbol.
-              AOut.SetSegOffset(SegNum, BaseAddr and $FFFFF);
+              // a segment below the base (.tls is listed at 0) stays at 0, not
+              // wrapped around to the top of the address space
+              if BaseAddr >= ImageBase then
+                AOut.SetSegOffset(SegNum, BaseAddr - ImageBase)
+              else
+                AOut.SetSegOffset(SegNum, 0);
+            end;
           end;
           Inc(I);
         end;
@@ -6195,6 +6876,9 @@ begin
       // Publics by Value - store module-relative addresses
       if Pos('Publics by Value', Line) > 0 then
       begin
+        // The header of a Win64x map has more columns (Rva+Base, Lib:Object):
+        // there the name is the first word after the address.
+        NameIsFirstToken := Pos('Rva+Base', Line) > 0;
         Inc(I);
         EmptyCount := 0;
         while I < SL.Count do
@@ -6212,12 +6896,30 @@ begin
           if Line.StartsWith('Line numbers') then Break;
           P := 1;
           Tok1 := STNextToken(Line, P);
-          Tok2 := STNextToken(Line, P);
-          if (Tok1 <> '') and (Tok2 <> '') then
+          // The name is the rest of the line, not one word: the C++ linker
+          // writes '__fastcall TForm1::Button1Click(TObject *)', and a Delphi
+          // name has no space to lose.
+          if NameIsFirstToken then
           begin
-            STParseAddr(Tok1, SegNum, BaseAddr);
-            if SegNum > 0 then
-              AOut.AddSymbol(BaseAddr + AOut.GetSegOffset(SegNum), Tok2);
+            // Win64x: the segment table lists many .text$... sections that share
+            // one segment number, each starting at its own offset, so segment
+            // plus offset says nothing; the Rva+Base column is the address.
+            Tok2 := STNextToken(Line, P);
+            Tok3 := STNextToken(Line, P);
+            VirtualAddr := StrToInt64Def('$' + Tok3, 0);
+            if (Tok1 <> '') and (Tok2 <> '') and (PreferredBase > 0) and
+               (VirtualAddr > PreferredBase) then
+              AOut.AddSymbol(NativeUInt(VirtualAddr - PreferredBase), Tok2);
+          end
+          else
+          begin
+            Tok2 := Trim(Copy(Line, P, MaxInt));
+            if (Tok1 <> '') and (Tok2 <> '') then
+            begin
+              STParseAddr(Tok1, SegNum, BaseAddr);
+              if SegNum > 0 then
+                AOut.AddSymbol(BaseAddr + AOut.GetSegOffset(SegNum), Tok2);
+            end;
           end;
           Inc(I);
         end;
@@ -6319,12 +7021,78 @@ begin
   end;
 end;
 
+// The map text of a .ewmap payload (header, then the stored map), decoded and
+// checked. A pure function of the bytes: the section reader below and the test
+// project both call it, so the format has one reader.
+function STDecodeMapPayload(AData: PByte; ASize: Integer;
+  out ABytes: TBytes): TSTMapStatus;
+var
+  Header: PEWMapHeader;
+  Stored: PByte;
+  Inflated: Pointer;
+  InflatedSize: Integer;
+begin
+  ABytes := nil;
+  if ASize < SizeOf(TEWMapHeader) then
+    Exit(msCorrupt);
+  Header := PEWMapHeader(AData);
+  if not CompareMem(@Header^.Magic, @EW_MAP_MAGIC, SizeOf(EW_MAP_MAGIC)) then
+    Exit(msCorrupt);
+  // A version this reader does not know is not damage: the exe was linked by a
+  // newer tool than this SDK, and the answer is "update the SDK".
+  if Header^.FormatVersion > EW_MAP_FORMAT_VERSION then
+    Exit(msUnsupported);
+  if (Header^.FormatVersion < EW_MAP_FORMAT_VERSION) or
+     (Header^.HeaderSize < SizeOf(TEWMapHeader)) or
+     (Int64(Header^.HeaderSize) + Int64(Header^.StoredSize) > Int64(ASize)) or
+     (Header^.RawSize = 0) or (Header^.RawSize > EW_MAP_MAX_RAW) then
+    Exit(msCorrupt);
+  Stored := PByte(NativeUInt(AData) + NativeUInt(Header^.HeaderSize));
+  case Header^.Codec of
+    EW_MAP_CODEC_RAW:
+      begin
+        if Header^.StoredSize <> Header^.RawSize then
+          Exit(msCorrupt);
+        SetLength(ABytes, Header^.RawSize);
+        Move(Stored^, ABytes[0], Header^.RawSize);
+      end;
+    EW_MAP_CODEC_ZLIB:
+      begin
+        try
+          ZDecompress(Stored, Integer(Header^.StoredSize), Inflated,
+            InflatedSize, Integer(Header^.RawSize));
+        except
+          // A damaged stream: the RTL raises, and a failed read of the map has
+          // to degrade to "no symbols", never to a crash in the error path.
+          Exit(msCorrupt);
+        end;
+        try
+          if Cardinal(InflatedSize) <> Header^.RawSize then
+            Exit(msCorrupt);
+          SetLength(ABytes, InflatedSize);
+          Move(Inflated^, ABytes[0], InflatedSize);
+        finally
+          FreeMem(Inflated);
+        end;
+      end;
+  else
+    Exit(msUnsupported);
+  end;
+  if crc32(0, PByte(ABytes), Length(ABytes)) <> Header^.Crc32 then
+  begin
+    ABytes := nil;
+    Exit(msCorrupt);
+  end;
+  Result := msOk;
+end;
+
 // Map text shipped inside a module image as the dedicated .ewmap section,
-// appended by the build-time injectors: a 16-byte signature, then the map.
+// appended by the build-time injectors: a header, then the stored map.
 // Pure memory walk of the in-place PE header, no resource APIs, both image
 // formats, and the payload counts as found only when it sits inside the
-// mounted image and starts with the exact signature.
-function STSectionMapText(AModule: THandle): string;
+// mounted image. AStatus tells "no section" from "a section this reader cannot
+// use", so the caller can say which one it is.
+function STSectionMapTextEx(AModule: THandle; out AStatus: TSTMapStatus): string;
 var
   ImageSize: NativeUInt;
   DosHeader: PImageDosHeader;
@@ -6334,11 +7102,12 @@ var
   Sections: PImageSectionHeader;
   Sec: PImageSectionHeader;
   Match: Boolean;
-  K, DataSize, SigLen: Integer;
+  K, DataSize, HeaderLen: Integer;
   Data: PByte;
   Bytes: TBytes;
 begin
   Result := '';
+  AStatus := msAbsent;
   if AModule = 0 then
     Exit;
   DosHeader := PImageDosHeader(NativeUInt(AModule));
@@ -6364,7 +7133,7 @@ begin
     Exit;
   Sections := PImageSectionHeader(NativeUInt(@(Nt32^.OptionalHeader)) +
     NativeUInt(OptSize));
-  SigLen := Length(EW_MAP_SECTION_SIG);
+  HeaderLen := SizeOf(TEWMapHeader);
   for I := 0 to SecCount - 1 do
   begin
     Sec := PImageSectionHeader(NativeUInt(Sections) +
@@ -6390,30 +7159,36 @@ begin
     end;
     if not Match then
       Continue;
+    // From here the section exists: whatever stops us is "cannot use it".
+    AStatus := msCorrupt;
     // The payload must sit inside the mounted image, or not at all.
-    if (Sec.SizeOfRawData <= NativeUInt(SigLen)) or
+    if (Sec.SizeOfRawData <= NativeUInt(HeaderLen)) or
        ((ImageSize > 0) and
         (NativeUInt(Sec.VirtualAddress) + Sec.SizeOfRawData > ImageSize)) then
       Exit;
-    // VirtualSize is exactly signature + map length: the length written back.
-    DataSize := Integer(Sec.Misc.VirtualSize) - SigLen;
-    if (DataSize <= 0) or (DataSize > Integer(Sec.SizeOfRawData) - SigLen) then
+    // VirtualSize is exactly header + stored map: the length written back.
+    DataSize := Integer(Sec.Misc.VirtualSize);
+    if (DataSize <= HeaderLen) or (DataSize > Integer(Sec.SizeOfRawData)) then
       Exit;
     Data := PByte(NativeUInt(AModule) + NativeUInt(Sec.VirtualAddress));
-    if not CompareMem(Data, @EW_MAP_SECTION_SIG, SigLen) then
-      Exit;
-    Inc(Data, SigLen);
-    SetLength(Bytes, DataSize);
-    Move(Data^, Bytes[0], DataSize);
-    Result := TEncoding.Default.GetString(Bytes);
+    AStatus := STDecodeMapPayload(Data, DataSize, Bytes);
+    if AStatus = msOk then
+      Result := TEncoding.Default.GetString(Bytes);
     Exit;
   end;
+end;
+
+function STSectionMapText(AModule: THandle): string;
+var
+  Status: TSTMapStatus;
+begin
+  Result := STSectionMapTextEx(AModule, Status);
 end;
 
 // Symbol text a module carries with it: the embedded map first - the .ewmap
 // section the injectors append, then the RCDATA resource older tooling still
 // links - then the plain .map file beside the module (development builds).
-function STSymbolTextForModule(AModule: THandle): string;
+function STSymbolTextForModule(AModule: THandle; out ASource: string): string;
 var
   ResInfo: HRSRC;
   ResLoad: HGLOBAL;
@@ -6421,14 +7196,19 @@ var
   ResSize: Integer;
   MapFile: string;
   Bytes: TBytes;
+  SecStatus: TSTMapStatus;
 begin
   Result := '';
+  ASource := 'none';
   if AModule = 0 then
     Exit;
   // Form 1: the .ewmap section the build-time injectors append.
-  Result := STSectionMapText(AModule);
+  Result := STSectionMapTextEx(AModule, SecStatus);
   if Result <> '' then
+  begin
+    ASource := 'embedded';
     Exit;
+  end;
   // Form 2: the RCDATA resource, for maps linked by other tooling.
   ResInfo := FindResource(AModule, EW_MAP_RESOURCE_NAME, RT_RCDATA);
   if ResInfo <> 0 then
@@ -6447,7 +7227,10 @@ begin
     end;
   end;
   if Result <> '' then
+  begin
+    ASource := 'embedded';
     Exit;
+  end;
   MapFile := ChangeFileExt(GetModuleName(AModule), '.map');
   if FileExists(MapFile) then
   begin
@@ -6459,7 +7242,16 @@ begin
       // An unreadable map must not turn a missing trace into a crash.
       Result := '';
     end;
+    if Result <> '' then
+      ASource := 'map_file';
   end;
+  // A section that is there but unreadable is not "no map": say which, so a
+  // trace without symbols is explained by its own event.
+  if (Result = '') and (ASource = 'none') then
+    case SecStatus of
+      msUnsupported: ASource := EW_SRC_UNSUPPORTED;
+      msCorrupt: ASource := EW_SRC_CORRUPT;
+    end;
 end;
 
 // A cached entry answers for the module mounted at that address NOW: module
@@ -6483,6 +7275,9 @@ end;
 function STSymbolsForModule(const AInfo: TSTModuleInfo): TSTModuleSymbols;
 var
   Text: string;
+{$IFDEF EXEWATCH_TESTING}
+  CountThisBuild: Boolean;
+{$ENDIF}
 begin
   Result := nil;
   if (AInfo.Module = 0) or (GSTModuleSymbols = nil) then
@@ -6509,16 +7304,28 @@ begin
     GSTModuleSymbolsLock.Release;
   end;
 {$IFDEF EXEWATCH_TESTING}
-  if TInterlocked.Increment(GSTLoadInFlight) > GSTLoadInFlightMax then
+  // Only the host module counts: every thread's stack also holds frames of
+  // ntdll and kernel32, and two threads building DIFFERENT modules at once is
+  // fine. The claim above is per module, so what must never happen is two
+  // builds of the same one - and every test thread resolves the host.
+  CountThisBuild := AInfo.Module = GSTHostInfo.Module;
+  if CountThisBuild and (TInterlocked.Increment(GSTLoadInFlight) > GSTLoadInFlightMax) then
     GSTLoadInFlightMax := GSTLoadInFlight;
   try
 {$ENDIF}
   // The build itself: no locks held.
-  Text := STSymbolTextForModule(AInfo.Module);
+  Text := STSymbolTextForModule(AInfo.Module, Result.Source);
   if Text <> '' then
   begin
     Result.ProgramName := ChangeFileExt(ExtractFileName(AInfo.ModuleName), '');
-    STBuildSymbols(Text, Result);
+    try
+      STBuildSymbols(Text, Result);
+    except
+      // A map this parser cannot read must not leave the entry "building" for
+      // ever: the module answers from its exports instead, and says so.
+      Result.Loaded := False;
+      Result.Source := 'none';
+    end;
   end;
   Result.Building := False;
   GSTModuleSymbolsLock.Acquire;
@@ -6529,7 +7336,8 @@ begin
   end;
 {$IFDEF EXEWATCH_TESTING}
   finally
-    TInterlocked.Decrement(GSTLoadInFlight);
+    if CountThisBuild then
+      TInterlocked.Decrement(GSTLoadInFlight);
   end;
 {$ENDIF}
 end;
@@ -6758,6 +7566,44 @@ end;
 // Log calls below must receive a line, never an exception of their own.
 function STResolveAddrInner(Address: NativeUInt): string; forward;
 
+// The name (and line) the map gives an address; '' = the map says nothing.
+// A line entry only speaks for the function it starts in: the last unit's
+// line table ends where its code ends, and code after it (units built without
+// line info) is within the lookup's slack. Taking the nearest earlier line
+// would put those frames on the last line of the program, with no name.
+function STDescribeAddress(Syms: TSTModuleSymbols; Address: NativeUInt): string;
+var
+  SymName, LineUnit, FuncName: string;
+  LineNum: Integer;
+  SymStart, LineStart: NativeUInt;
+begin
+  Result := '';
+  SymName := Syms.FindSymbolAt(Address, SymStart);
+  Syms.FindLine(Address, LineNum, LineUnit, LineStart);
+  if (LineNum > 0) and (SymName <> '') and (LineStart < SymStart) then
+  begin
+    LineNum := 0;
+    LineUnit := '';
+  end;
+  if (LineUnit <> '') and (SymName <> '') and SymName.StartsWith(LineUnit + '.') then
+  begin
+    FuncName := Copy(SymName, Length(LineUnit) + 2, MaxInt);
+    // Win32 Finalization fix
+    if (Syms.ProgramName <> '') and
+       SameText(LineUnit, Syms.ProgramName) and
+       SameText(FuncName, 'Finalization') then
+      FuncName := Syms.ProgramName;
+    if LineNum > 0 then
+      Result := Format('%s.%s (line %d)', [LineUnit, FuncName, LineNum])
+    else
+      Result := Format('%s.%s', [LineUnit, FuncName]);
+  end
+  else if (LineUnit <> '') and (LineNum > 0) then
+    Result := Format('%s (line %d)', [LineUnit, LineNum])
+  else if SymName <> '' then
+    Result := SymName;
+end;
+
 function STResolveAddr(Address: NativeUInt): string;
 var
   Info: TSTModuleInfo;
@@ -6778,8 +7624,6 @@ function STResolveAddrInner(Address: NativeUInt): string;
 var
   Info: TSTModuleInfo;
   Syms: TSTModuleSymbols;
-  SymName, LineUnit, FuncName: string;
-  LineNum: Integer;
 begin
   Info := STModuleInfoForAddress(Address);
   if Info.Module = 0 then
@@ -6792,27 +7636,7 @@ begin
     Result := '';
     if Syms.Loaded and (Address >= Syms.Base) and
        ((Syms.SizeOfImage = 0) or (Address - Syms.Base < Syms.SizeOfImage)) then
-    begin
-      SymName := Syms.FindSymbol(Address);
-      Syms.FindLine(Address, LineNum, LineUnit);
-      if (LineUnit <> '') and (SymName <> '') and SymName.StartsWith(LineUnit + '.') then
-      begin
-        FuncName := Copy(SymName, Length(LineUnit) + 2, MaxInt);
-        // Win32 Finalization fix
-        if (Syms.ProgramName <> '') and
-           SameText(LineUnit, Syms.ProgramName) and
-           SameText(FuncName, 'Finalization') then
-          FuncName := Syms.ProgramName;
-        if LineNum > 0 then
-          Result := Format('%s.%s (line %d)', [LineUnit, FuncName, LineNum])
-        else
-          Result := Format('%s.%s', [LineUnit, FuncName]);
-      end
-      else if (LineUnit <> '') and (LineNum > 0) then
-        Result := Format('%s (line %d)', [LineUnit, LineNum])
-      else if SymName <> '' then
-        Result := SymName;
-    end;
+      Result := STDescribeAddress(Syms, Address);
     if Result = '' then
     begin
       // No map symbols for this module: the PE export table is the next best
@@ -6936,7 +7760,12 @@ begin
     GSTModuleSymbolsLock := TCriticalSection.Create;
     GSTModuleSymbols := TDictionary<THandle, TSTModuleSymbols>.Create;
     GSTExportTables := TDictionary<THandle, TSTExportCache>.Create;
-    GSTHostInfo := STModuleInfoForAddress(NativeUInt(HInstance));
+    // A C++Builder executable does not set HInstance (it stays 0): the host
+    // is then the process's own image.
+    if HInstance <> 0 then
+      GSTHostInfo := STModuleInfoForAddress(NativeUInt(HInstance))
+    else
+      GSTHostInfo := STModuleInfoForAddress(NativeUInt(GetModuleHandle(nil)));
     // Published last: a thread that sees ST_INIT_READY sees complete state.
     GSTInitState := ST_INIT_READY;
   finally
@@ -6964,6 +7793,7 @@ begin
     (Pos('RaiseException', ALine) > 0) or
     (Pos('NotifyExceptFinally', ALine) > 0) or
     (Pos('@RaiseExcept', ALine) > 0) or
+    (Pos('RaiseAtExcept', ALine) > 0) or
     (Pos('InternalRaiseAtExcept', ALine) > 0) or
     (Pos('@HandleFinally', ALine) > 0) or
     (Pos('@HandleAnyException', ALine) > 0) or
@@ -7058,10 +7888,35 @@ begin
 end;
 {$ENDIF CPUX64}
 
+// Like the reason above, it answers for the HOST module: that is the one
+// whose symbols decide whether a trace reads on another machine.
+function GetSymbolSource: string;
+var
+  Symbols: TSTModuleSymbols;
+begin
+  Result := 'none';
+  if GSTHostInfo.Module = 0 then
+    Exit;
+  Symbols := STSymbolsForModule(GSTHostInfo);
+  if Symbols = nil then
+    Exit;
+  if Symbols.Loaded and (Symbols.Source <> '') then
+    Result := Symbols.Source
+  // No usable symbols, but the exe does carry a map: say why, not just 'none'.
+  else if (Symbols.Source = EW_SRC_UNSUPPORTED) or
+          (Symbols.Source = EW_SRC_CORRUPT) then
+    Result := Symbols.Source;
+end;
+
 {$ELSE}
 
 // Non-Windows stubs
 function GetStackTraceStr(FramesToSkip: Integer = 0): string;
+begin
+  Result := '';
+end;
+
+function GetSymbolSource: string;
 begin
   Result := '';
 end;
@@ -7072,6 +7927,22 @@ begin
 end;
 
 {$ENDIF}
+
+procedure AttachSymbolSource(AExtraData: TJSONObject);
+var
+  Trace: TJSONValue;
+  Source: string;
+begin
+  if AExtraData = nil then
+    Exit;
+  Trace := AExtraData.GetValue('stack_trace');
+  if (Trace = nil) or (Trace.Value = '') or
+     (AExtraData.GetValue('symbol_source') <> nil) then
+    Exit;
+  Source := GetSymbolSource;
+  if Source <> '' then
+    AExtraData.AddPair('symbol_source', Source);
+end;
 
 function GetLastExceptionStackTrace(E: Exception): string;
 {$IFDEF MSWINDOWS}
@@ -7246,13 +8117,14 @@ end;
 function EWTestFindSymbol(AAddress: NativeUInt): string;
 var
   Entry: TSTModuleSymbols;
+  Start: NativeUInt;
 begin
   Result := '';
   GSTModuleSymbolsLock.Acquire;
   try
     if not GSTModuleSymbols.TryGetValue(HInstance, Entry) then
       Exit;
-    Result := Entry.FindSymbol(AAddress);
+    Result := Entry.FindSymbolAt(AAddress, Start);
   finally
     GSTModuleSymbolsLock.Release;
   end;
@@ -7274,10 +8146,48 @@ begin
   Result := STSectionMapText(AModule);
 end;
 
+function EWTestDecodeMapPayload(AData: PByte; ASize: Integer;
+  out ABytes: TBytes): Integer;
+begin
+  Result := Ord(STDecodeMapPayload(AData, ASize, ABytes));
+end;
+
 function EWTestModuleText(AModule: THandle): string;
+var
+  Source: string;
 begin
   STEnsureInit;
-  Result := STSymbolTextForModule(AModule);
+  Result := STSymbolTextForModule(AModule, Source);
+end;
+
+function EWTestModuleSource(AModule: THandle): string;
+begin
+  STEnsureInit;
+  STSymbolTextForModule(AModule, Result);
+end;
+
+function EWTestHostSymbolSource: string;
+begin
+  STEnsureInit;
+  Result := GetSymbolSource;
+end;
+
+function EWTestDescribeFromMapText(const AMapText: string; AOffset: NativeUInt): string;
+var
+  Table: TSTModuleSymbols;
+begin
+  Table := TSTModuleSymbols.Create;
+  try
+    STBuildSymbols(AMapText, Table);
+    Result := STDescribeAddress(Table, AOffset);
+  finally
+    Table.Free;
+  end;
+end;
+
+function EWTestIsConsoleSubsystem(AModule: THandle): Boolean;
+begin
+  Result := STIsConsoleSubsystem(AModule);
 end;
 
 {$IFDEF CPUX86}
