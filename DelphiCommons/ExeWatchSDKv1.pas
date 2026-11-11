@@ -3918,6 +3918,9 @@ begin
   FBreadcrumbOwners := TDictionary<TThreadID, Int64>.Create;
   FBreadcrumbsLock := TCriticalSection.Create;
   // Timing/Profiling
+  // The stopwatch of the runtime has no frequency until its first instance: without this
+  // one, on Delphi XE8 a timing that ends before the first send divides by zero.
+  TStopwatch.StartNew;
   FPendingTimings := TDictionary<TThreadID, TDictionary<string, TTimingEntry>>.Create;
   FTimingStacks := TDictionary<TThreadID, TList<string>>.Create;
   FPendingTimingsOwners := TDictionary<TThreadID, Int64>.Create;
