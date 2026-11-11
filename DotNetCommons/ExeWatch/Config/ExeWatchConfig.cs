@@ -17,15 +17,19 @@ public sealed class ExeWatchConfig
 
     /// <summary>
     /// On by default. Nothing that names a person leaves the machine:
-    /// - Username and Hostname are sent as their FNV-1a hash (8 hex characters), the same two hashes
+    /// - Username and Hostname are sent as a code of 8 hex characters each, the same two codes
     ///   DeviceId is made of: "mario.rossi@PC01" becomes "a1b2c3d4@0f1e2d3c";
     /// - in the executable path, the working directory and the command line, a folder that belongs to
     ///   the user (USERPROFILE, APPDATA, LOCALAPPDATA, TEMP; HOME elsewhere) is replaced by its name
     ///   between square brackets: "[USERPROFILE]\app\app.exe";
-    /// - local IP addresses and volume names are not sent.
-    /// The hash is deterministic, so the same user and the same machine always give the same value.
-    /// It is a pseudonym, not a cipher. Names of other people inside command line arguments are not
-    /// recognized. Set to false to send everything as it is.
+    /// - local IP addresses and volume names are not sent;
+    /// - the same folders are replaced in the message and the stack trace of the exceptions the SDK reports.
+    /// A code is HMAC-SHA256 of the name with a key the SDK never sends (the machine id of the
+    /// operating system or, where there is none, a random value kept in a file on the machine), so the
+    /// same user on the same machine gives the same code as long as that key is there, and whoever
+    /// has only the code cannot go back to the name, not even by trying names. Names of other people inside
+    /// command line arguments and the text of your own log messages are not touched. Set to false to
+    /// send everything as it is.
     /// </summary>
     public bool AnonymizeDeviceId { get; set; } = true;
 

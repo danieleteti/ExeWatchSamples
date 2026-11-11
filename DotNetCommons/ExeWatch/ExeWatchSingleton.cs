@@ -68,6 +68,7 @@ public static class ExeWatchSdk
     public static void Fatal(string message, string tag = "main") => Instance.Fatal(message, tag);
     public static void ErrorWithException(Exception ex, string tag = "main", string additionalMessage = "")
         => Instance.ErrorWithException(ex, tag, additionalMessage);
+    public static string ScrubUserPaths(string text) => Instance.ScrubUserPaths(text);
 
     // Breadcrumbs
     public static void AddBreadcrumb(BreadcrumbType type, string category, string message, Dictionary<string, object>? data = null)

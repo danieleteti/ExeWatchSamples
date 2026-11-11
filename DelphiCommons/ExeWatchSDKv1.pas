@@ -390,15 +390,19 @@ type
     MaxPendingAgeDays: Integer;
     /// <summary>
     /// On by default. Nothing that names a person leaves the machine:
-    /// - Username and Hostname are sent as their FNV-1a hash (8 hex characters), the same
-    ///   two hashes DeviceId is made of: "mario.rossi@PC01" becomes "a1b2c3d4@0f1e2d3c";
+    /// - Username and Hostname are sent as a code of 8 hex characters each, the same two codes
+    ///   DeviceId is made of: "mario.rossi@PC01" becomes "a1b2c3d4@0f1e2d3c";
     /// - in the executable path, the working directory and the command line, a folder that
     ///   belongs to the user (USERPROFILE, APPDATA, LOCALAPPDATA, TEMP; HOME elsewhere) is
     ///   replaced by its name between square brackets: "[USERPROFILE]\app\app.exe";
-    /// - local IP addresses and volume names are not sent.
-    /// The hash is deterministic, so the same user and the same machine always give the same
-    /// value. It is a pseudonym, not a cipher. Names of other people inside command line
-    /// arguments are not recognized. Set to False to send everything as it is.
+    /// - local IP addresses and volume names are not sent;
+    /// - the same folders are replaced in the text of the exceptions the SDK reports.
+    /// A code is HMAC-SHA256 of the name with a key the SDK never sends (the machine id of the
+    /// operating system or, where there is none, a random value kept in a file on the machine),
+    /// so the same user on the same machine gives the same code as long as that key is there,
+    /// and whoever has only the code cannot go back to the name, not even by trying names.
+    /// Names of other people inside command line arguments and the text of your own log
+    /// messages are not touched. Set to False to send everything as it is.
     /// </summary>
     AnonymizeDeviceId: Boolean;
     /// <summary>
@@ -446,6 +450,8 @@ type
     FDeviceInfoSent: Boolean;
     FCustomDeviceInfo: TDictionary<string, string>;
     FCustomDeviceInfoLock: TCriticalSection;
+    // The folders of the user, read once: empty when AnonymizeDeviceId is off.
+    FUserPathRoots: TArray<TEWPathRoot>;
     // Breadcrumbs (thread-local: each thread has its own breadcrumb trail)
     FBreadcrumbs: TDictionary<TThreadID, TList<TBreadcrumb>>;
     FBreadcrumbOwners: TDictionary<TThreadID, Int64>; // generation ID — detects ThreadID reuse on Linux
@@ -561,6 +567,13 @@ type
 
     procedure ErrorWithException(E: Exception; const ATag: string = 'main';
       const AAdditionalMessage: string = '');
+
+    /// <summary>
+    ///   AText with the folders of the user replaced by their placeholder ("[USERPROFILE]\..."),
+    ///   when AnonymizeDeviceId is on; AText as it is otherwise. The SDK passes the text of the
+    ///   exceptions it reports through it. Use it on a message of yours that may hold a path.
+    /// </summary>
+    function ScrubUserPaths(const AText: string): string;
 
     /// <summary>
     /// Queues device hardware info and custom info to be sent to the server.
@@ -836,7 +849,29 @@ type
     class function GetUsername: string;
     class function GetOSVersion: string;
     class function GetDeviceId: string;
+    /// <summary>
+    ///   The code that stands for a user name: KeyedCode with the key of this machine.
+    /// </summary>
     class function AnonymizeUsername(const AUsername: string): string;
+    /// <summary>
+    ///   The code that stands for a host name. What follows the first dot is left out:
+    ///   "srv01" and "srv01.example.com" are one machine, and runtimes report either.
+    /// </summary>
+    class function AnonymizeHostname(const AHostname: string): string;
+    /// <summary>
+    ///   The first 8 hex digits of HMAC-SHA256(AKey, AName), AName in UTF-8 with its ASCII
+    ///   letters in lower case. 'anonymous' for an empty name. Without the key the code says
+    ///   nothing about the name.
+    /// </summary>
+    class function KeyedCode(const AKey: TBytes; const AName: string): string;
+    /// <summary>
+    ///   The key of the codes. It is the machine id the operating system keeps (MachineGuid on
+    ///   Windows, /etc/machine-id on Linux); where there is none, a random value the SDK writes
+    ///   once in a folder of the user. It is never sent and never logged.
+    /// </summary>
+    class function GetDeviceKey: TBytes;
+    /// <summary>The machine id of the operating system, empty where there is none.</summary>
+    class function GetMachineId: string;
     /// <summary>
     ///   The folders of the current user that appear in paths: USERPROFILE, APPDATA, LOCALAPPDATA
     ///   and TEMP on Windows, HOME elsewhere. Empty values are left out.
@@ -864,6 +899,26 @@ function EWIsPseudoFileSystem(const AFileSystem: string): Boolean;
 function EWIsNetworkFileSystem(const AFileSystem: string): Boolean;
 function EWParseMountLine(const ALine: string; out ADevice, AMountPoint, AFileSystem: string): Boolean;
 function EWBlockDeviceName(const ADevice: string): string;
+
+/// <summary>
+///   SHA-256 (FIPS 180-4) and HMAC-SHA256 (RFC 2104). The RTL has no SHA-2 before Delphi 10, and
+///   the codes of user and host must be the same from XE8 on: hence one implementation here,
+///   public so that the tests check it against the published vectors.
+/// </summary>
+function EWSha256(const AData: TBytes): TBytes;
+function EWHmacSha256(const AKey, AData: TBytes): TBytes;
+
+/// <summary>
+///   The key kept in AFolder\device.key, written there the first time. With no folder given it
+///   is the folder of the user the SDK uses where the operating system has no machine id.
+///   ANewKey is the key to write where there is none: the one of this process, unless a test
+///   stands for several processes at once. Public so that the tests reach it.
+/// </summary>
+function EWDeviceKeyFromFile(const AFolder: string = ''; const ANewKey: string = ''): string;
+/// <summary>
+///   True for 32 hex digits, which is how Linux writes its machine id. Public for the tests.
+/// </summary>
+function EWIsLinuxMachineId(const AValue: string): Boolean;
 
 function ExeWatch: TExeWatch;
 function EW: TExeWatch; inline;  // Short alias for ExeWatch
@@ -1442,7 +1497,7 @@ begin
         begin
           E := Exception(ExceptObject);
           ExtraData.AddPair('exception_class', E.ClassName);
-          GExeWatch.Log(llFatal, 'Unhandled exception: ' + E.Message, 'exception', ExtraData);
+          GExeWatch.Log(llFatal, 'Unhandled exception: ' + GExeWatch.ScrubUserPaths(E.Message), 'exception', ExtraData);
         end
         else
         begin
@@ -3013,26 +3068,414 @@ begin
   Result := GetUsername + '@' + GetHostname;
 end;
 
-class function TExeWatchHelper.AnonymizeUsername(const AUsername: string): string;
+// ---------------------------------------------------------------------------
+// SHA-256 and HMAC-SHA256. The sums wrap around on purpose: overflow and range checking are
+// switched off for these two functions and put back after them.
+// ---------------------------------------------------------------------------
+{$IFOPT Q+}{$DEFINE EW_SHA_RESTORE_Q}{$Q-}{$ENDIF}
+{$IFOPT R+}{$DEFINE EW_SHA_RESTORE_R}{$R-}{$ENDIF}
+function EWSha256(const AData: TBytes): TBytes;
+const
+  K: array[0..63] of Cardinal = (
+    $428A2F98, $71374491, $B5C0FBCF, $E9B5DBA5, $3956C25B, $59F111F1, $923F82A4, $AB1C5ED5,
+    $D807AA98, $12835B01, $243185BE, $550C7DC3, $72BE5D74, $80DEB1FE, $9BDC06A7, $C19BF174,
+    $E49B69C1, $EFBE4786, $0FC19DC6, $240CA1CC, $2DE92C6F, $4A7484AA, $5CB0A9DC, $76F988DA,
+    $983E5152, $A831C66D, $B00327C8, $BF597FC7, $C6E00BF3, $D5A79147, $06CA6351, $14292967,
+    $27B70A85, $2E1B2138, $4D2C6DFC, $53380D13, $650A7354, $766A0ABB, $81C2C92E, $92722C85,
+    $A2BFE8A1, $A81A664B, $C24B8B70, $C76C51A3, $D192E819, $D6990624, $F40E3585, $106AA070,
+    $19A4C116, $1E376C08, $2748774C, $34B0BCB5, $391C0CB3, $4ED8AA4A, $5B9CCA4F, $682E6FF3,
+    $748F82EE, $78A5636F, $84C87814, $8CC70208, $90BEFFFA, $A4506CEB, $BEF9A3F7, $C67178F2);
 var
-  Bytes: TBytes;
-  Hash: Cardinal;
+  H: array[0..7] of Cardinal;
+  W: array[0..63] of Cardinal;
+  Msg: TBytes;
+  BitLen: UInt64;
+  DataLen, PadLen, Block, I, P: Integer;
+  A, B, C, D, E, F, G, HH, T1, T2, S0, S1: Cardinal;
+
+  function RotR(AValue: Cardinal; ABits: Integer): Cardinal;
+  begin
+    Result := (AValue shr ABits) or (AValue shl (32 - ABits));
+  end;
+
+begin
+  // The message, one bit set, zeros up to 8 bytes short of a block, then its length in bits.
+  DataLen := Length(AData);
+  BitLen := UInt64(DataLen) * 8;
+  PadLen := 64 - ((DataLen + 9) mod 64);
+  if PadLen = 64 then
+    PadLen := 0;
+  Msg := nil;
+  SetLength(Msg, DataLen + 1 + PadLen + 8);
+  if DataLen > 0 then
+    Move(AData[0], Msg[0], DataLen);
+  Msg[DataLen] := $80;
+  for I := 0 to 7 do
+    Msg[Length(Msg) - 1 - I] := Byte(BitLen shr (8 * I));
+
+  H[0] := $6A09E667; H[1] := $BB67AE85; H[2] := $3C6EF372; H[3] := $A54FF53A;
+  H[4] := $510E527F; H[5] := $9B05688C; H[6] := $1F83D9AB; H[7] := $5BE0CD19;
+
+  for Block := 0 to (Length(Msg) div 64) - 1 do
+  begin
+    P := Block * 64;
+    for I := 0 to 15 do
+      W[I] := (Cardinal(Msg[P + I * 4]) shl 24) or (Cardinal(Msg[P + I * 4 + 1]) shl 16) or
+              (Cardinal(Msg[P + I * 4 + 2]) shl 8) or Cardinal(Msg[P + I * 4 + 3]);
+    for I := 16 to 63 do
+    begin
+      S0 := RotR(W[I - 15], 7) xor RotR(W[I - 15], 18) xor (W[I - 15] shr 3);
+      S1 := RotR(W[I - 2], 17) xor RotR(W[I - 2], 19) xor (W[I - 2] shr 10);
+      W[I] := W[I - 16] + S0 + W[I - 7] + S1;
+    end;
+    A := H[0]; B := H[1]; C := H[2]; D := H[3];
+    E := H[4]; F := H[5]; G := H[6]; HH := H[7];
+    for I := 0 to 63 do
+    begin
+      S1 := RotR(E, 6) xor RotR(E, 11) xor RotR(E, 25);
+      T1 := HH + S1 + ((E and F) xor ((not E) and G)) + K[I] + W[I];
+      S0 := RotR(A, 2) xor RotR(A, 13) xor RotR(A, 22);
+      T2 := S0 + ((A and B) xor (A and C) xor (B and C));
+      HH := G; G := F; F := E; E := D + T1;
+      D := C; C := B; B := A; A := T1 + T2;
+    end;
+    H[0] := H[0] + A; H[1] := H[1] + B; H[2] := H[2] + C; H[3] := H[3] + D;
+    H[4] := H[4] + E; H[5] := H[5] + F; H[6] := H[6] + G; H[7] := H[7] + HH;
+  end;
+
+  SetLength(Result, 32);
+  for I := 0 to 7 do
+  begin
+    Result[I * 4] := Byte(H[I] shr 24);
+    Result[I * 4 + 1] := Byte(H[I] shr 16);
+    Result[I * 4 + 2] := Byte(H[I] shr 8);
+    Result[I * 4 + 3] := Byte(H[I]);
+  end;
+end;
+
+function EWHmacSha256(const AKey, AData: TBytes): TBytes;
+var
+  Key, Inner, Outer, Digest: TBytes;
   I: Integer;
 begin
-  if AUsername = '' then
-    Exit('anonymous');
-  // FNV-1a hash — fast, non-reversible, zero dependencies
-  // Overflow is intentional (modular arithmetic), so disable overflow checking
-  Bytes := TEncoding.UTF8.GetBytes(AUsername);
-  {$IFOPT Q+}{$DEFINE EW_RESTORE_Q}{$Q-}{$ENDIF}
-  Hash := 2166136261;
-  for I := 0 to Length(Bytes) - 1 do
-  begin
-    Hash := Hash xor Bytes[I];
-    Hash := Hash * 16777619;
+  // A key longer than a block is replaced by its hash; then it is padded with zeros to a block.
+  if Length(AKey) > 64 then
+    Key := EWSha256(AKey)
+  else
+    Key := Copy(AKey, 0, Length(AKey));
+  SetLength(Key, 64);
+  SetLength(Inner, 64 + Length(AData));
+  for I := 0 to 63 do
+    Inner[I] := Key[I] xor $36;
+  if Length(AData) > 0 then
+    Move(AData[0], Inner[64], Length(AData));
+  Digest := EWSha256(Inner);
+  SetLength(Outer, 64 + 32);
+  for I := 0 to 63 do
+    Outer[I] := Key[I] xor $5C;
+  Move(Digest[0], Outer[64], 32);
+  Result := EWSha256(Outer);
+end;
+{$IFDEF EW_SHA_RESTORE_R}{$R+}{$UNDEF EW_SHA_RESTORE_R}{$ENDIF}
+{$IFDEF EW_SHA_RESTORE_Q}{$Q+}{$UNDEF EW_SHA_RESTORE_Q}{$ENDIF}
+
+var
+  // The key of a process that has neither a machine id nor a file it can write: it lasts as
+  // long as the process. Set once, when the unit starts.
+  GEWVolatileDeviceKey: string;
+
+// What is left when the system gives no random value: the clock, a counter of fine grain, the
+// process and where its memory is. Who knows them can work it out, and it is still not a name.
+function EWLastResortKey: string;
+var
+  Digest: TBytes;
+  I: Integer;
+begin
+  Digest := EWSha256(TEncoding.UTF8.GetBytes(Format('%.10f/%d/%d/%d/%p',
+    [Double(Now), Int64(TThread.GetTickCount), TStopwatch.GetTimeStamp,
+     Int64(TExeWatchHelper.GetCurrentProcessId), Pointer(@Digest)])));
+  Result := '';
+  for I := 0 to High(Digest) do
+    Result := Result + IntToHex(Digest[I], 2);
+end;
+
+// 64 hex digits that nobody can guess. A function of its own, and not an expression of the
+// initialization section: there the Win64 compiler that writes COFF objects (the modern
+// C++ toolchain) stops with an internal error. It never raises: the unit starts with it.
+function EWNewVolatileDeviceKey: string;
+{$IFDEF POSIX}
+var
+  Handle: THandle;
+  Bytes: TBytes;
+  I: Integer;
+{$ENDIF}
+begin
+  Result := '';
+  try
+    {$IFDEF POSIX}
+    // The random source of the kernel. A GUID is not one here: on Linux the runtime makes it of
+    // the clock and of the network card, with a library that an image may not have.
+    SetLength(Bytes, 32);
+    Handle := FileOpen('/dev/urandom', fmOpenRead or fmShareDenyNone);
+    if Handle <> INVALID_HANDLE_VALUE then
+      try
+        if FileRead(Handle, Bytes[0], Length(Bytes)) = Length(Bytes) then
+          for I := 0 to High(Bytes) do
+            Result := Result + IntToHex(Bytes[I], 2);
+      finally
+        FileClose(Handle);
+      end;
+    {$ELSE}
+    // On Windows the two GUIDs are random: 122 bits each.
+    Result := StringReplace(StringReplace(StringReplace(
+      TGUID.NewGuid.ToString + TGUID.NewGuid.ToString, '{', '', [rfReplaceAll]), '}', '', [rfReplaceAll]),
+      '-', '', [rfReplaceAll]);
+    {$ENDIF}
+  except
+    Result := '';
   end;
-  {$IFDEF EW_RESTORE_Q}{$Q+}{$UNDEF EW_RESTORE_Q}{$ENDIF}
-  Result := IntToHex(Hash, 8).ToLower;
+  if Result = '' then
+    Result := EWLastResortKey;
+  Result := LowerCase(Result);
+end;
+
+// Where the operating system keeps no machine id (a container, macOS, a phone) the key is a
+// random value written once in a folder of the user: ~/.exewatch/device.key, the same file the
+// .NET and Python SDKs use. A file that cannot be written leaves the key of the process: the
+// codes then change at every start, and that is the price of not sending a name.
+// The key in the file, empty when the file is not there or holds no key. A key is 32 to 1024
+// printable ASCII characters, with the spaces, tabs and line ends around them left out: the
+// same rule, on the same bytes, as the .NET and Python SDKs. A file of zeros, which a crash can
+// leave, is not a key. Opened without denying anything to the others: on Windows a file that
+// somebody is giving its name to, in that instant, would not open, and would be taken for a
+// file with no key.
+function EWReadDeviceKey(const AFileName: string): string;
+var
+  Handle: THandle;
+  Buffer: TBytes;
+  Count, First, Last, I: Integer;
+begin
+  Result := '';
+  try
+    {$IFDEF MSWINDOWS}
+    Handle := CreateFile(PChar(AFileName), GENERIC_READ,
+      FILE_SHARE_READ or FILE_SHARE_WRITE or FILE_SHARE_DELETE, nil, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    {$ELSE}
+    Handle := FileOpen(AFileName, fmOpenRead or fmShareDenyNone);
+    {$ENDIF}
+    if Handle <> INVALID_HANDLE_VALUE then
+      try
+        // What follows the first 4096 bytes is not read: a key is far shorter.
+        SetLength(Buffer, 4096);
+        Count := FileRead(Handle, Buffer[0], Length(Buffer));
+        First := 0;
+        Last := Count - 1;
+        while (First <= Last) and (Buffer[First] in [9, 10, 13, 32]) do
+          Inc(First);
+        while (Last >= First) and (Buffer[Last] in [9, 10, 13, 32]) do
+          Dec(Last);
+        Count := Last - First + 1;
+        if (Count >= 32) and (Count <= 1024) then
+        begin
+          for I := First to Last do
+            if (Buffer[I] < 33) or (Buffer[I] > 126) then
+              Exit;
+          Result := TEncoding.ASCII.GetString(Buffer, First, Count);
+        end;
+      finally
+        FileClose(Handle);
+      end;
+  except
+    Result := '';
+  end;
+end;
+
+function EWDeviceKeyFromFile(const AFolder: string = ''; const ANewKey: string = ''): string;
+var
+  Folder, FileName, Draft, NewKey: string;
+  Handle: THandle;
+  Bytes: TBytes;
+  Whole, Named: Boolean;
+begin
+  Result := '';
+  NewKey := ANewKey;
+  if NewKey = '' then
+    NewKey := GEWVolatileDeviceKey;
+  try
+    Folder := AFolder;
+    if Folder = '' then
+    begin
+      {$IFDEF MSWINDOWS}
+      Folder := TPath.GetDirectoryName(TPath.GetDirectoryName(TExeWatchHelper.GetDefaultStoragePath('k')));
+      {$ELSE}
+      Folder := TPath.GetHomePath;
+      if Folder <> '' then
+        Folder := TPath.Combine(Folder, '.exewatch');
+      {$ENDIF}
+    end;
+    if Folder = '' then
+      Exit(NewKey);
+    FileName := TPath.Combine(Folder, 'device.key');
+    Result := EWReadDeviceKey(FileName);
+    if Result = '' then
+    begin
+      ForceDirectories(Folder);
+      // Written whole under another name, then given its name in one step: processes that
+      // start together never read half a key. $180 is rw for the owner alone. No share mode:
+      // it is a lock, and where the folder refuses locks the file would be made and then left.
+      Draft := FileName + '.' + Copy(EWNewVolatileDeviceKey, 1, 16);
+      Handle := FileCreate(Draft, fmExclusive, $180);
+      if Handle <> INVALID_HANDLE_VALUE then
+      begin
+        try
+          Bytes := TEncoding.ASCII.GetBytes(NewKey);
+          Whole := FileWrite(Handle, Bytes[0], Length(Bytes)) = Length(Bytes);
+          // On the disk before it has its name: a power cut leaves no empty key file.
+          {$IFDEF MSWINDOWS}
+          FlushFileBuffers(Handle);
+          {$ENDIF}
+          {$IFDEF LINUX}
+          fsync(Integer(Handle));
+          {$ENDIF}
+        finally
+          FileClose(Handle);
+        end;
+        // A draft that is not whole (a full disk) is not given the name.
+        if Whole then
+        begin
+          // The step that gives the name is refused when the file is there: the first one wins.
+          {$IFDEF MSWINDOWS}
+          Named := RenameFile(Draft, FileName);
+          {$ELSE}
+          {$IFDEF LINUX}
+          Named := link(PAnsiChar(UTF8String(Draft)), PAnsiChar(UTF8String(FileName))) = 0;
+          {$ELSE}
+          Named := False;
+          {$ENDIF}
+          {$ENDIF}
+          // Not given, and no good key there: a file left empty or cut short by a crash, or a
+          // platform where that step does not exist. The draft takes its place.
+          if (not Named) and (EWReadDeviceKey(FileName) = '') then
+          begin
+            {$IFDEF MSWINDOWS}
+            System.SysUtils.DeleteFile(FileName);
+            {$ENDIF}
+            RenameFile(Draft, FileName);
+          end;
+        end;
+        System.SysUtils.DeleteFile(Draft);
+      end;
+      Result := EWReadDeviceKey(FileName);
+    end;
+  except
+    Result := '';
+  end;
+  if Result = '' then
+    Result := NewKey;
+end;
+
+function EWIsLinuxMachineId(const AValue: string): Boolean;
+var
+  I: Integer;
+begin
+  // An image that never had its first boot holds the word "uninitialized" there: the same
+  // key on every machine made from it, known to everybody.
+  Result := Length(AValue) = 32;
+  if Result then
+    for I := 1 to Length(AValue) do
+      if not CharInSet(AValue[I], ['0'..'9', 'a'..'f', 'A'..'F']) then
+        Exit(False);
+end;
+
+class function TExeWatchHelper.GetMachineId: string;
+{$IFDEF MSWINDOWS}
+const
+  // The 64-bit view of the registry: the 32-bit one, where a 32-bit process on 64-bit Windows
+  // is sent, has no MachineGuid.
+  EW_KEY_WOW64_64KEY = $0100;
+var
+  Key: HKEY;
+  Buffer: array[0..127] of Char;
+  Size, ValueType: DWORD;
+begin
+  Result := '';
+  if RegOpenKeyEx(HKEY_LOCAL_MACHINE, 'SOFTWARE\Microsoft\Cryptography', 0,
+       KEY_QUERY_VALUE or EW_KEY_WOW64_64KEY, Key) <> ERROR_SUCCESS then
+    Exit;
+  try
+    FillChar(Buffer, SizeOf(Buffer), 0);
+    Size := SizeOf(Buffer) - SizeOf(Char);
+    ValueType := 0;
+    if (RegQueryValueEx(Key, 'MachineGuid', nil, @ValueType, @Buffer[0], @Size) = ERROR_SUCCESS) and
+       (ValueType = REG_SZ) then
+      Result := Trim(string(PChar(@Buffer[0])));
+  finally
+    RegCloseKey(Key);
+  end;
+end;
+{$ELSE}
+{$IFDEF LINUX}
+begin
+  if not EWReadSysText('/etc/machine-id', 256, Result) then
+    Result := '';
+  Result := Trim(Result);
+  if not EWIsLinuxMachineId(Result) then
+  begin
+    if not EWReadSysText('/var/lib/dbus/machine-id', 256, Result) then
+      Result := '';
+    Result := Trim(Result);
+    if not EWIsLinuxMachineId(Result) then
+      Result := '';
+  end;
+end;
+{$ELSE}
+begin
+  Result := '';
+end;
+{$ENDIF}
+{$ENDIF}
+
+class function TExeWatchHelper.GetDeviceKey: TBytes;
+var
+  Id: string;
+begin
+  Id := GetMachineId;
+  if Id = '' then
+    Id := EWDeviceKeyFromFile;
+  Result := TEncoding.UTF8.GetBytes(Id);
+end;
+
+class function TExeWatchHelper.KeyedCode(const AKey: TBytes; const AName: string): string;
+var
+  Msg, Mac: TBytes;
+  I: Integer;
+begin
+  if AName = '' then
+    Exit('anonymous');
+  Msg := TEncoding.UTF8.GetBytes(AName);
+  // Lower case for the ASCII letters only, and on the bytes: every language gives the same
+  // result, whatever its idea of case is. A byte of a multi-byte sequence is never in A..Z.
+  for I := 0 to High(Msg) do
+    if (Msg[I] >= $41) and (Msg[I] <= $5A) then
+      Msg[I] := Msg[I] + $20;
+  Mac := EWHmacSha256(AKey, Msg);
+  Result := LowerCase(IntToHex(Mac[0], 2) + IntToHex(Mac[1], 2) + IntToHex(Mac[2], 2) + IntToHex(Mac[3], 2));
+end;
+
+class function TExeWatchHelper.AnonymizeUsername(const AUsername: string): string;
+begin
+  Result := KeyedCode(GetDeviceKey, AUsername);
+end;
+
+class function TExeWatchHelper.AnonymizeHostname(const AHostname: string): string;
+var
+  DotPos: Integer;
+begin
+  DotPos := Pos('.', AHostname);
+  if DotPos > 1 then
+    Result := AnonymizeUsername(Copy(AHostname, 1, DotPos - 1))
+  else
+    Result := AnonymizeUsername(AHostname);
 end;
 
 class function TExeWatchHelper.GetUserPathRoots: TArray<TEWPathRoot>;
@@ -3458,12 +3901,13 @@ begin
       (FConfig.DeviceInfo.DeviceId <> TExeWatchHelper.GetDeviceId);
     FConfig.DeviceInfo.Username := TExeWatchHelper.AnonymizeUsername(FConfig.DeviceInfo.Username);
     // The hostname can embed the username (e.g. host "DANIELETETIPC" contains
-    // login "daniele"). It is hashed too, and the Hostname field of the payload
-    // carries that same hash: the real name never leaves the machine, and
-    // DeviceId stays stable per machine (hash@hash).
-    FConfig.DeviceInfo.Hostname := TExeWatchHelper.AnonymizeUsername(FConfig.DeviceInfo.Hostname);
+    // login "daniele"). It becomes a code too, and the Hostname field of the payload
+    // carries that same code: the real name never leaves the machine, and
+    // DeviceId stays stable per machine (code@code).
+    FConfig.DeviceInfo.Hostname := TExeWatchHelper.AnonymizeHostname(FConfig.DeviceInfo.Hostname);
     if not HasOwnDeviceId then
       FConfig.DeviceInfo.DeviceId := FConfig.DeviceInfo.Username + '@' + FConfig.DeviceInfo.Hostname;
+    FUserPathRoots := TExeWatchHelper.GetUserPathRoots;
   end;
   FBuffer := TList<TLogEvent>.Create;
   FBufferLock := TCriticalSection.Create;
@@ -4916,8 +5360,7 @@ begin
   // Collect hardware info
   HardwareInfo := THardwareInfo.Collect;
   if FConfig.AnonymizeDeviceId then
-    HardwareInfo.Anonymize(TExeWatchHelper.GetUserPathRoots,
-      {$IFDEF MSWINDOWS}False{$ELSE}True{$ENDIF});
+    HardwareInfo.Anonymize(FUserPathRoots, {$IFDEF MSWINDOWS}False{$ELSE}True{$ENDIF});
 
   Result := TJSONObject.Create;
   try
@@ -5191,7 +5634,7 @@ begin
   if E <> nil then
   begin
     ExtraData.AddPair('exception_class', E.ClassName);
-    ExtraData.AddPair('exception_message', E.Message);
+    ExtraData.AddPair('exception_message', ScrubUserPaths(E.Message));
   end;
   {$IFDEF MSWINDOWS}
   // The trace taken where the exception was raised, when it has one: from a
@@ -5216,11 +5659,21 @@ begin
       Msg := 'ErrorWithException called without an exception';
   end
   else if AAdditionalMessage <> '' then
-    Msg := AAdditionalMessage + ': ' + E.Message
+    Msg := AAdditionalMessage + ': ' + ScrubUserPaths(E.Message)
   else
-    Msg := E.Message;
+    Msg := ScrubUserPaths(E.Message);
 
   Log(llError, Msg, ATag, ExtraData);
+end;
+
+function TExeWatch.ScrubUserPaths(const AText: string): string;
+begin
+  // The message the runtime writes for a file it cannot open holds the folder of the user,
+  // and with it the name.
+  if FConfig.AnonymizeDeviceId then
+    Result := TExeWatchHelper.ScrubUserPaths(AText, FUserPathRoots, {$IFDEF MSWINDOWS}False{$ELSE}True{$ENDIF})
+  else
+    Result := AText;
 end;
 
 procedure TExeWatch.Flush;
@@ -8357,6 +8810,7 @@ end;
 
 initialization
   GExeWatchLock := TCriticalSection.Create;
+  GEWVolatileDeviceKey := EWNewVolatileDeviceKey;
   // Install exception handler
   GOldExceptProc := System.ExceptProc;
   System.ExceptProc := @ExeWatchExceptProc;

@@ -51,9 +51,9 @@ public static class ExeWatchWinForms
                     ["exception_source"] = "winforms_thread_exception"
                 };
 
-                var message = $"{ex.GetType().Name}: {ex.Message}";
+                var message = $"{ex.GetType().Name}: {ExeWatchSdk.ScrubUserPaths(ex.Message)}";
                 if (ex.StackTrace != null)
-                    message += $"\n{ex.StackTrace}";
+                    message += $"\n{ExeWatchSdk.ScrubUserPaths(ex.StackTrace)}";
 
                 ExeWatchSdk.Log(LogLevel.Error, message, "exception", extraData);
             }

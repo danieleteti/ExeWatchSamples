@@ -32,33 +32,210 @@ internal static class PlatformHelper
     }
 
     /// <summary>
-    /// FNV-1a 32 bit over the UTF-8 bytes, as 8 lowercase hex digits. The same function, with the same
-    /// result, as the Delphi, DLL and Python SDKs: the same user and the same machine give the same
-    /// value in all of them. It is a pseudonym, not a cipher.
+    /// The code that stands for a user name: <see cref="KeyedCode"/> with the key of this machine. The same
+    /// function, with the same result, as the Delphi, DLL and Python SDKs: the same user on the same
+    /// machine gives the same code in all of them.
     /// </summary>
-    public static string AnonymizeUsername(string username)
+    public static string AnonymizeUsername(string username) => KeyedCode(GetDeviceKey(), username);
+
+    /// <summary>
+    /// The code that stands for a host name. What follows the first dot is left out: "srv01" and
+    /// "srv01.example.com" are one machine, and runtimes report either.
+    /// </summary>
+    public static string AnonymizeHostname(string hostname)
     {
-        if (string.IsNullOrEmpty(username))
-            return "anonymous";
-        unchecked
-        {
-            uint hash = 2166136261;
-            foreach (var b in System.Text.Encoding.UTF8.GetBytes(username))
-            {
-                hash ^= b;
-                hash *= 16777619;
-            }
-            return hash.ToString("x8");
-        }
+        var dot = string.IsNullOrEmpty(hostname) ? -1 : hostname.IndexOf('.');
+        return AnonymizeUsername(dot > 0 ? hostname[..dot] : hostname);
     }
 
     /// <summary>
-    /// Build an anonymized device id with BOTH halves hashed. Hashing only the
-    /// username would still leak the login when the hostname embeds it
-    /// (e.g. host "ALICE-PC" contains user "alice").
+    /// The first 8 hex digits of HMAC-SHA256(key, name), the name in UTF-8 with its ASCII letters in
+    /// lower case; "anonymous" for an empty name. Without the key the code says nothing about the name.
+    /// </summary>
+    public static string KeyedCode(byte[] key, string name)
+    {
+        if (string.IsNullOrEmpty(name))
+            return "anonymous";
+        var message = System.Text.Encoding.UTF8.GetBytes(name);
+        // On the bytes, and for ASCII only: every language gives the same result, whatever its idea of case.
+        for (var i = 0; i < message.Length; i++)
+            if (message[i] >= 0x41 && message[i] <= 0x5A)
+                message[i] += 0x20;
+        var mac = System.Security.Cryptography.HMACSHA256.HashData(key, message);
+        return Convert.ToHexString(mac, 0, 4).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// A device id with both halves coded. Coding only the user name would still give the login away
+    /// when the host name embeds it (e.g. host "ALICE-PC" contains user "alice").
     /// </summary>
     public static string AnonymizeDeviceId(string username, string hostname)
-        => $"{AnonymizeUsername(username)}@{AnonymizeUsername(hostname)}";
+        => $"{AnonymizeUsername(username)}@{AnonymizeHostname(hostname)}";
+
+    /// <summary>
+    /// 32 hex digits, as the operating system writes it. An image that never had its first boot holds the word
+    /// "uninitialized" there: the same key on every machine made from it, known to everybody.
+    /// </summary>
+    internal static bool IsLinuxMachineId(string value)
+        => value.Length == 32 && value.All(Uri.IsHexDigit);
+
+    /// <summary>The machine id of the operating system, empty where there is none.</summary>
+    public static string GetMachineId()
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                // The 64-bit view: the 32-bit one, where a 32-bit process on 64-bit Windows is sent, has no MachineGuid.
+                using var hklm = Microsoft.Win32.RegistryKey.OpenBaseKey(
+                    Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64);
+                using var key = hklm.OpenSubKey(@"SOFTWARE\Microsoft\Cryptography");
+                return (key?.GetValue("MachineGuid") as string ?? "").Trim();
+            }
+            if (OperatingSystem.IsLinux())
+            {
+                foreach (var file in new[] { "/etc/machine-id", "/var/lib/dbus/machine-id" })
+                {
+                    try
+                    {
+                        var id = File.ReadAllText(file).Trim();
+                        if (IsLinuxMachineId(id)) return id;
+                    }
+                    catch
+                    {
+                        // not there, not readable: the next one
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // no machine id: the key file is used
+        }
+        return "";
+    }
+
+    // The key of a process that has neither a machine id nor a file it can write: it lasts as long as the process.
+    private static readonly string VolatileDeviceKey = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+
+    /// <summary>
+    /// The key of the codes: the machine id the operating system keeps (MachineGuid on Windows,
+    /// /etc/machine-id on Linux); where there is none, a random value written once in a folder of the user.
+    /// It is never sent and never logged.
+    /// </summary>
+    public static byte[] GetDeviceKey()
+    {
+        var id = GetMachineId();
+        if (id.Length == 0)
+            id = DeviceKeyFromFile();
+        return System.Text.Encoding.UTF8.GetBytes(id);
+    }
+
+    // The key in the file, empty when the file is not there or holds no key. A key is 32 to 1024
+    // printable ASCII characters, with the spaces, tabs and line ends around them left out: the same
+    // rule, on the same bytes, as the Delphi and Python SDKs. A file of zeros, which a crash can leave,
+    // is not a key. Opened without denying anything to the others: on Windows a file that somebody is
+    // giving its name to, in that instant, would not open, and would be taken for a file with no key.
+    private static string ReadDeviceKey(string file)
+    {
+        try
+        {
+            using var stream = new FileStream(file, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            var buffer = new byte[4096];
+            var count = stream.ReadAtLeast(buffer, buffer.Length, throwOnEndOfStream: false);
+            var key = System.Text.Encoding.Latin1.GetString(buffer, 0, count).Trim(' ', '\t', '\r', '\n');
+            return key.Length is >= 32 and <= 1024 && key.AsSpan().IndexOfAnyExceptInRange('!', '~') < 0 ? key : "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    [DllImport("libc", EntryPoint = "link")]
+    private static extern int LinkFile([MarshalAs(UnmanagedType.LPUTF8Str)] string existing,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string created);
+
+    // Gives the draft the name of the key file, false when that name is taken. On Windows a move
+    // does it. Elsewhere the move of the runtime looks first and renames after, and a rename takes
+    // the place of what is there: a hard link refuses.
+    private static bool GiveName(string draft, string file)
+    {
+        try
+        {
+            if (!OperatingSystem.IsWindows())
+                return LinkFile(draft, file) == 0;
+            File.Move(draft, file);
+            return true;
+        }
+        catch (Exception e) when (e is IOException or DllNotFoundException or EntryPointNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    // A file that cannot be written leaves the key of the process: the codes then change at every start,
+    // and that is the price of not sending a name. newKey is the key to write where there is none:
+    // the one of this process, unless a test stands for several processes at once.
+    internal static string DeviceKeyFromFile(string? folder = null, string? newKey = null)
+    {
+        newKey ??= VolatileDeviceKey;
+        try
+        {
+            // ~/.exewatch/device.key, the same file the Delphi and Python SDKs use.
+            folder ??= OperatingSystem.IsWindows()
+                ? Path.GetDirectoryName(Path.GetDirectoryName(GetDefaultStoragePath("k")))!
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".exewatch");
+            var file = Path.Combine(folder, "device.key");
+            var key = ReadDeviceKey(file);
+            if (key.Length > 0)
+                return key;
+            Directory.CreateDirectory(folder);
+            // Written whole under another name, then given its name in one step: processes that start
+            // together never read half a key.
+            var draft = file + "." + Guid.NewGuid().ToString("N");
+            try
+            {
+                var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None };
+                if (!OperatingSystem.IsWindows())
+                    options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+                using (var stream = new FileStream(draft, options))
+                {
+                    stream.Write(System.Text.Encoding.ASCII.GetBytes(newKey));
+                    stream.Flush(true);         // on the disk before it has its name: a power cut leaves no empty key file
+                }
+                // Refused when the file is there: the first one wins. A file left empty or cut short by
+                // a crash, or a place with no hard links: the draft takes its place. A good key written
+                // by somebody else in the meantime stays.
+                if (!GiveName(draft, file) && ReadDeviceKey(file).Length == 0)
+                    File.Move(draft, file, true);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // not written, or not put in place: what the file holds now decides
+            }
+            finally
+            {
+                try
+                {
+                    File.Delete(draft);         // no error when the move took it away
+                }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                {
+                    // a draft that stays behind is not a reason to give up the key in the file
+                }
+            }
+            key = ReadDeviceKey(file);
+            if (key.Length > 0)
+                return key;
+        }
+        catch
+        {
+            // not readable, not writable: the key of the process
+        }
+        return newKey;
+    }
 
     public static string GetOsType()
     {

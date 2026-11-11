@@ -63,7 +63,7 @@ begin
       ExtraData.AddPair('stack_trace', GetLastExceptionStackTrace(E));
       {$ENDIF}
 
-      ExeWatch.Log(llError, 'GUI exception: ' + E.Message, 'exception', ExtraData);
+      ExeWatch.Log(llError, 'GUI exception: ' + ExeWatch.ScrubUserPaths(E.Message), 'exception', ExtraData);
     except
       // Silently ignore errors during exception logging
       ExtraData.Free;

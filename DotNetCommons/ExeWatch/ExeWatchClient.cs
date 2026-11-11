@@ -12,6 +12,8 @@ namespace ExeWatch;
 public sealed class ExeWatchClient : IDisposable
 {
     private readonly ExeWatchConfig _config;
+    // The folders of the user, read once: empty when AnonymizeDeviceId is off.
+    private readonly IReadOnlyList<PathRoot> _userPathRoots;
     private readonly DeviceInfo _deviceInfo;
     private readonly InternalLogger _logger;
     private readonly ApiTraceLogger _apiTrace;
@@ -97,10 +99,11 @@ public sealed class ExeWatchClient : IDisposable
             : PlatformHelper.GetDeviceId();
         if (config.AnonymizeDeviceId)
         {
-            // The payload carries the same two hashes the device id is made of: the real names never leave the machine.
+            // The payload carries the same two codes the device id is made of: the real names never leave the machine.
             username = PlatformHelper.AnonymizeUsername(username);
-            hostname = PlatformHelper.AnonymizeUsername(hostname);
+            hostname = PlatformHelper.AnonymizeHostname(hostname);
         }
+        _userPathRoots = config.AnonymizeDeviceId ? PathScrubber.GetUserPathRoots() : new List<PathRoot>();
         _deviceInfo = new DeviceInfo
         {
             DeviceId = deviceId,
@@ -557,14 +560,26 @@ public sealed class ExeWatchClient : IDisposable
     public void Error(string format, string tag, params object[] args) => Log(LogLevel.Error, string.Format(format, args), tag);
     public void Fatal(string format, string tag, params object[] args) => Log(LogLevel.Fatal, string.Format(format, args), tag);
 
+    /// <summary>
+    /// The text with the folders of the user replaced by their placeholder ("[USERPROFILE]\..."), when
+    /// AnonymizeDeviceId is on; the text as it is otherwise. The SDK passes the message and the stack
+    /// trace of the exceptions it reports through it. Use it on a message of yours that may hold a path.
+    /// </summary>
+    public string ScrubUserPaths(string text)
+        => _config.AnonymizeDeviceId && !string.IsNullOrEmpty(text)
+            ? PathScrubber.Scrub(text, _userPathRoots, PathScrubber.PathsAreCaseSensitive)
+            : text;
+
     public void ErrorWithException(Exception ex, string tag = "main", string additionalMessage = "")
     {
+        // "Could not find file 'C:\Users\name\...'" is the runtime's own text, and it carries the name.
+        var exceptionMessage = ScrubUserPaths(ex.Message);
         var message = string.IsNullOrEmpty(additionalMessage)
-            ? $"{ex.GetType().Name}: {ex.Message}"
-            : $"{additionalMessage} | {ex.GetType().Name}: {ex.Message}";
+            ? $"{ex.GetType().Name}: {exceptionMessage}"
+            : $"{additionalMessage} | {ex.GetType().Name}: {exceptionMessage}";
 
         if (ex.StackTrace != null)
-            message += $"\n{ex.StackTrace}";
+            message += $"\n{ScrubUserPaths(ex.StackTrace)}";
 
         var extraData = new Dictionary<string, object>
         {
@@ -746,7 +761,7 @@ public sealed class ExeWatchClient : IDisposable
         {
             var hardware = SystemInfoCollector.Collect();
             if (_config.AnonymizeDeviceId)
-                PathScrubber.Anonymize(hardware, PathScrubber.GetUserPathRoots(), PathScrubber.PathsAreCaseSensitive);
+                PathScrubber.Anonymize(hardware, _userPathRoots, PathScrubber.PathsAreCaseSensitive);
 
             Dictionary<string, string>? customInfo = null;
             lock (_customDeviceInfoLock)
@@ -1290,7 +1305,8 @@ public sealed class ExeWatchClient : IDisposable
                     ["exception_source"] = "unhandled"
                 };
 
-                Log(LogLevel.Fatal, $"Unhandled exception: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}",
+                Log(LogLevel.Fatal,
+                    $"Unhandled exception: {ex.GetType().Name}: {ScrubUserPaths(ex.Message)}\n{ScrubUserPaths(ex.StackTrace ?? "")}",
                     "exception", extraData);
 
                 PersistBuffer();
